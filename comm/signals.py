@@ -1,0 +1,1 @@
+"""Distributed control signal constants."""
