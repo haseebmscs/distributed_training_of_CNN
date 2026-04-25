@@ -1,2 +1,6 @@
 /dataset/data
 **/__pycache__/
+/logs
+/checkpoints
+*.h5
+*.ckpt
