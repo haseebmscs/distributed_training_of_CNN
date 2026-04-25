@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.distributed as dist
+import os
 
 from config import (
     MASTER_IP, MASTER_PORT,
-    EPOCHS, LEARNING_RATE, HEARTBEAT_ENABLED
+    EPOCHS, LEARNING_RATE, HEARTBEAT_ENABLED,
+    GLOO_SOCKET_IFNAME
 )
 from models.pipeline_model import split_model, PipelineStage
 from comm.comm_utils import (
@@ -59,16 +61,21 @@ class Worker:
         """
         Connects this worker to the distributed network.
         """
-        init_url = f"tcp://{MASTER_IP}:{MASTER_PORT}"
+        os.environ["MASTER_ADDR"] = MASTER_IP
+        os.environ["MASTER_PORT"] = str(MASTER_PORT)
+        if GLOO_SOCKET_IFNAME:
+            os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
 
         print(f"[Worker {self.rank}] Connecting to network...")
-        print(f"  URL        : {init_url}")
+        print(f"  URL        : tcp://{MASTER_IP}:{MASTER_PORT}")
+        if GLOO_SOCKET_IFNAME:
+            print(f"  IFACE      : {GLOO_SOCKET_IFNAME}")
         print(f"  Rank       : {self.rank}")
         print(f"  World size : {self.world_size}")
 
         dist.init_process_group(
             backend     = "gloo",
-            init_method = init_url,
+            init_method = "env://",
             world_size  = self.world_size,
             rank        = self.rank
         )
