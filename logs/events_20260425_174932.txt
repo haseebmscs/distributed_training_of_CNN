@@ -1,0 +1,3 @@
+[17:49:43] Worker rank 1 joined
+[17:49:43] Worker rank 2 joined
+[17:49:49] Training started | workers=2 stages=2 epochs=10

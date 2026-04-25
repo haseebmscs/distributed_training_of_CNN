@@ -2,7 +2,7 @@ import torch
 import torch.distributed as dist
 from config import MAX_ACTIVE, MIN_WORKERS
 from models.pipeline_model import split_model
-from comm.signals import SIGNAL_STANDBY, SIGNAL_PROMOTE
+from comm.signals import SIGNAL_STANDBY, SIGNAL_PROMOTE, SIGNAL_ASSIGN
 from comm.comm_utils import send_signal
 
 class Scheduler:
@@ -88,7 +88,8 @@ class Scheduler:
 
         return self.stages
 
-    def _send_stage_assignment(self, rank, stage_idx, total_stages):
+    def _send_stage_assignment(self, rank, stage_idx, total_stages,
+                               send_assign_signal=True):
         """
         Sends stage assignment info to a worker.
         Worker needs to know:
@@ -102,6 +103,10 @@ class Scheduler:
             stage_idx    (int): 0-based stage index
             total_stages (int): total pipeline stages
         """
+        # Tell worker an assignment payload is about to arrive.
+        if send_assign_signal:
+            send_signal(SIGNAL_ASSIGN, dst=rank)
+
         # Pack assignment into a tensor:
         # [stage_idx, total_stages]
         assignment = torch.tensor(
@@ -226,7 +231,8 @@ class Scheduler:
         self._send_stage_assignment(
             replacement,
             dead_stage_idx,
-            self.num_stages
+            self.num_stages,
+            send_assign_signal=False
         )
 
         print(f"[Scheduler] ✅ Rank {replacement} "

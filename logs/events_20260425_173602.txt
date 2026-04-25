@@ -1,0 +1,5 @@
+[17:37:14] Worker rank 1 joined
+[17:37:14] Worker rank 2 joined
+[17:37:19] Training started | workers=2 stages=2 epochs=10
+[17:37:56] Worker rank 2 failed
+[17:37:56] Stage 2 reassigned after rank 2 failure

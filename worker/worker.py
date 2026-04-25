@@ -5,7 +5,7 @@ import torch.distributed as dist
 
 from config import (
     MASTER_IP, MASTER_PORT,
-    EPOCHS, LEARNING_RATE
+    EPOCHS, LEARNING_RATE, HEARTBEAT_ENABLED
 )
 from models.pipeline_model import split_model, PipelineStage
 from comm.comm_utils import (
@@ -17,7 +17,7 @@ from comm.signals import (
     SIGNAL_START, SIGNAL_STOP,
     SIGNAL_NEXT,  SIGNAL_HELLO,
     SIGNAL_STANDBY, SIGNAL_PROMOTE,
-    SIGNAL_DONE
+    SIGNAL_DONE, SIGNAL_ASSIGN
 )
 from comm.heartbeat    import HeartbeatSender
 from utils.checkpoint  import (
@@ -162,6 +162,7 @@ class Worker:
         # ── Forward through this stage ─────────────────────
         self.stage.train()
         output = self.stage(received)
+        self.last_output = output
 
         # ── Send output or compute loss ────────────────────
         if is_last:
@@ -189,8 +190,6 @@ class Worker:
             send_tensor(output.detach(), dst=next_rank)
 
             return output, None
-
-        self.last_output = output
 
     def backward_pass(self, loss=None):
         """
@@ -350,25 +349,18 @@ class Worker:
             self.is_active = False
             self.run_standby()
 
-        else:
-            # Received stage assignment
-            # Parse it (stage_idx, total_stages)
-            assignment = torch.tensor(
-                [signal_val, 0],
-                dtype=torch.long
-            )
-            dist.recv(assignment[1:], src=0)
-
-            self.stage_idx    = assignment[0].item()
-            self.total_stages = assignment[1].item()
+        elif signal_val == SIGNAL_ASSIGN.item():
+            # Active worker receives assignment payload next.
+            self.receive_assignment()
             self.is_active    = True
 
             # ── Step 4: Build CNN stage ────────────────────
             self.build_stage()
 
             # ── Step 5: Start heartbeat ────────────────────
-            self.heartbeat = HeartbeatSender(self.rank)
-            self.heartbeat.start()
+            if HEARTBEAT_ENABLED:
+                self.heartbeat = HeartbeatSender(self.rank)
+                self.heartbeat.start()
 
             # ── Step 6: Run training loop ──────────────────
             self.run_active()
@@ -376,6 +368,12 @@ class Worker:
             # ── Step 7: Stop heartbeat ─────────────────────
             if self.heartbeat:
                 self.heartbeat.stop()
+
+        else:
+            raise RuntimeError(
+                f"[Worker {self.rank}] Unexpected startup signal: "
+                f"{signal_val}"
+            )
 
         # ── Step 8: Cleanup ────────────────────────────────
         print(f"[Worker {self.rank}] Cleaning up...")

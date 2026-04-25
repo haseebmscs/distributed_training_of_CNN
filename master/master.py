@@ -5,7 +5,8 @@ import time
 
 from config import (
     MASTER_IP, MASTER_PORT, MAX_WORKERS,
-    EPOCHS, BATCH_SIZE, LEARNING_RATE, MIN_WORKERS
+    EPOCHS, BATCH_SIZE, LEARNING_RATE, MIN_WORKERS,
+    HEARTBEAT_ENABLED
 )
 from master.registry   import WorkerRegistry
 from master.scheduler  import Scheduler
@@ -163,8 +164,10 @@ class Master:
         first_worker = self.scheduler.get_first_worker()
         last_worker  = self.scheduler.get_last_worker()
 
-        # Step 1: Send START signal to first worker
-        send_signal(SIGNAL_START, dst=first_worker)
+        # Step 1: Send START to every active stage worker.
+        # Each worker's loop expects one control signal per batch.
+        for rank in self.registry.get_active_ranks():
+            send_signal(SIGNAL_START, dst=rank)
 
         # Step 2: Send image batch to first worker
         send_tensor(images, dst=first_worker)
@@ -213,10 +216,10 @@ class Master:
                 accuracy      = accuracy
             )
 
-            # Send NEXT signal to first worker
-            # so it prepares for next batch
-            first = self.scheduler.get_first_worker()
-            send_signal(SIGNAL_NEXT, dst=first)
+            # Send NEXT to all active workers so batch counters
+            # and checkpoint cadence stay aligned across stages.
+            for rank in self.registry.get_active_ranks():
+                send_signal(SIGNAL_NEXT, dst=rank)
 
         avg_loss = total_loss / total_batches
         avg_acc  = total_acc  / total_batches
@@ -242,11 +245,14 @@ class Master:
 
         # ── Step 4: Start heartbeat monitor ───────────────
         active_ranks = self.registry.get_active_ranks()
-        self.monitor = HeartbeatMonitor(
-            active_ranks        = active_ranks,
-            on_failure_callback = self.handle_failure
-        )
-        self.monitor.start()
+        if HEARTBEAT_ENABLED:
+            self.monitor = HeartbeatMonitor(
+                active_ranks        = active_ranks,
+                on_failure_callback = self.handle_failure
+            )
+            self.monitor.start()
+        else:
+            print("[Master] Heartbeat monitor disabled")
 
         # ── Step 5: Load dataset ───────────────────────────
         print("\n[Master] Loading CIFAR-10 dataset...")
@@ -289,7 +295,8 @@ class Master:
             send_signal(SIGNAL_STOP, dst=rank)
 
         # ── Step 9: Stop monitor ───────────────────────────
-        self.monitor.stop()
+        if self.monitor:
+            self.monitor.stop()
 
         # ── Step 10: Final summary ─────────────────────────
         self.logger.log_training_complete()

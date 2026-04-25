@@ -5,6 +5,10 @@ import torch.distributed as dist
 from config import HEARTBEAT_INTERVAL, HEARTBEAT_TIMEOUT
 from comm.signals import SIGNAL_HEARTBEAT
 
+# Keep heartbeat packets on their own message lane so they
+# cannot be confused with training/control tensors.
+HEARTBEAT_TAG = 999
+
 class HeartbeatSender:
     """
     Runs on each WORKER machine.
@@ -35,7 +39,7 @@ class HeartbeatSender:
                     [self.rank],
                     dtype=torch.long
                 )
-                dist.send(signal, dst=0)
+                dist.send(signal, dst=0, tag=HEARTBEAT_TAG)
                 print(f"[Heartbeat] Rank {self.rank} "
                       f"→ sent alive signal to Master")
 
@@ -111,7 +115,11 @@ class HeartbeatMonitor:
             try:
                 signal = torch.zeros(1, dtype=torch.long)
                 # dist.recv with src=None receives from ANY rank
-                info = dist.recv(signal, src=None)
+                info = dist.recv(
+                    signal,
+                    src=None,
+                    tag=HEARTBEAT_TAG
+                )
                 sender_rank = info  # which worker sent this
 
                 # Update last seen time for this worker

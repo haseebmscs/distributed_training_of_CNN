@@ -18,21 +18,27 @@ The model is split into stages. Each machine handles one stage.
 ### 1. Install dependencies
 pip install -r requirements.txt
 
-### 2. Find Master machine IP
-Windows: ipconfig
-Linux:   ifconfig
+### 2. Choose run mode
 
-### 3. Set Master IP in config.py
-MASTER_IP = "your.master.ip.here"
+Local single-machine test (3 terminals):
+- Keep MASTER_IP = "127.0.0.1" in config.py
+- Run:
+	python main.py --role master --world-size 3
+	python main.py --role worker --rank 1 --world-size 3
+	python main.py --role worker --rank 2 --world-size 3
 
-### 4. On MASTER machine run:
-python run.py --role master
+Multi-machine run:
+- Set MASTER_IP to the master machine LAN IP
+	(or export environment variable MASTER_IP)
+- Use the same MASTER_PORT and world-size on all machines
+- Run on master:
+	python main.py --role master --world-size 3
+- Run on worker 1:
+	python main.py --role worker --rank 1 --world-size 3
+- Run on worker 2:
+	python main.py --role worker --rank 2 --world-size 3
 
-### 5. On each WORKER machine run:
-python run.py --role worker
-
-Workers connect automatically. Training starts when
-minimum workers have joined.
+See MULTI_MACHINE_RUNBOOK.md for full checklist.
 
 ---
 
@@ -71,7 +77,7 @@ distributed-cnn/
 ├── dataset/
 │   └── custom_dataset.py ← CIFAR-10 loader
 ├── config.py           ← all settings
-└── run.py              ← entry point for all machines
+└── main.py              ← entry point for all machines
 
 ---
 

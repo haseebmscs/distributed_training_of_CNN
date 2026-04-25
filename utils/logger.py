@@ -156,5 +156,40 @@ class TrainingLogger:
         self.log_event(f"Worker rank {rank} joined")
 
     def log_worker_failed(self, rank):
+        """Logs when a worker is marked failed."""
+        self.log_event(f"Worker rank {rank} failed")
+
+    def log_training_start(self, num_workers, num_stages, epochs):
+        """Logs training configuration when run starts."""
+        self.log_event(
+            f"Training started | workers={num_workers} "
+            f"stages={num_stages} epochs={epochs}"
+        )
+
+    def log_training_complete(self):
+        """Logs completion and total wall clock time."""
+        total_time = time.time() - self.start_time
+        self.log_event(
+            f"Training complete | total_time={total_time:.1f}s"
+        )
+
+    def print_summary(self):
+        """Prints a lightweight summary of collected history."""
+        total_batches = len(self.history["loss"])
+        if total_batches == 0:
+            print("[Logger] No batches logged.")
+            return
+
+        final_loss = self.history["loss"][-1]
+        final_acc = self.history["accuracy"][-1]
+        best_acc = max(self.history["accuracy"])
+
+        print("\n" + "=" * 55)
+        print("  Training Summary")
+        print(f"  Batches Logged : {total_batches}")
+        print(f"  Final Loss     : {final_loss:.4f}")
+        print(f"  Final Accuracy : {final_acc:.2f}%")
+        print(f"  Best Accuracy  : {best_acc:.2f}%")
+        print("=" * 55 + "\n")
 
 

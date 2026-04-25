@@ -3,7 +3,7 @@ from PIL import Image
 from torch.utils.data import Dataset, DataLoader
 import torchvision
 import torchvision.transforms as transforms
-from config import DATA_ROOT, BATCH_SIZE
+from config import DATA_ROOT, BATCH_SIZE, DATA_LOADER_WORKERS
 
 # Training transform — with augmentation
 TRAIN_TRANSFORM = transforms.Compose([
@@ -78,15 +78,15 @@ def get_dataloaders():
         train_dataset,
         batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=2,
-        pin_memory=True
+        num_workers=DATA_LOADER_WORKERS,
+        pin_memory=False
     )
     test_loader = DataLoader(
         test_dataset,
         batch_size=BATCH_SIZE,
         shuffle=False,
-        num_workers=2,
-        pin_memory=True
+        num_workers=DATA_LOADER_WORKERS,
+        pin_memory=False
     )
 
     print(f"[Dataset] Train batches: {len(train_loader)}")

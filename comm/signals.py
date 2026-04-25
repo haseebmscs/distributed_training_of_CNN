@@ -16,3 +16,4 @@ SIGNAL_PROMOTE   = torch.tensor([4])  # standby → you are now active!
 SIGNAL_HEARTBEAT = torch.tensor([5])  # I am alive
 SIGNAL_DONE      = torch.tensor([6])  # I finished my work for this batch
 SIGNAL_HELLO     = torch.tensor([7])  # worker announcing itself to master
+SIGNAL_ASSIGN    = torch.tensor([8])  # master will send stage assignment next
