@@ -53,50 +53,16 @@ class Master:
               f"{MIN_WORKERS} workers...")
     
     def setup_network(self, world_size):
-        import os
         import socket
         from datetime import timedelta
 
-        my_hostname = socket.gethostname()
-
-        # Decide which IP this machine should use
-    # Master hostname = Haris → use MASTER_IP
-        if my_hostname == "Haris":
-            my_ip = MASTER_IP
-        else:
-            my_ip = MASTER_IP   # master always uses MASTER_IP
-
-    # ── Patch socket to return correct IP ─────────────────
-    # Gloo internally calls getaddrinfo(hostname)
-    # We intercept it and return the correct WiFi IP
-        _real_getaddrinfo = socket.getaddrinfo
-        def _patched_getaddrinfo(host, port, *args, **kwargs):
-            if host == my_hostname:
-                host = my_ip
-            return _real_getaddrinfo(host, port, *args, **kwargs)
-        socket.getaddrinfo = _patched_getaddrinfo
-
-        _real_gethostbyname = socket.gethostbyname
-        def _patched_gethostbyname(host):
-            if host == my_hostname:
-                return my_ip
-            return _real_gethostbyname(host)
-        socket.gethostbyname = _patched_gethostbyname
-
-    # ── Environment variables ──────────────────────────────
-        os.environ["MASTER_ADDR"]        = MASTER_IP
-        os.environ["MASTER_PORT"]        = str(MASTER_PORT)
-        os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
-        os.environ["USE_LIBUV"]          = "0"
-
+        print(f"  Hostname   : {socket.gethostname()}")
         print(f"[Master] Setting up network...")
-        print(f"  Hostname   : {my_hostname}")
-        print(f"  My IP      : {my_ip}")
         print(f"  MASTER_IP  : {MASTER_IP}")
         print(f"  PORT       : {MASTER_PORT}")
-        print(f"  Interface  : {GLOO_SOCKET_IFNAME}")
         print(f"  World size : {world_size}")
 
+    # env vars already set in main.py before torch import
         dist.init_process_group(
             backend     = "gloo",
             init_method = "env://",

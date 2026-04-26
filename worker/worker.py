@@ -63,59 +63,26 @@ class Worker:
         print(f"[Worker {rank}] Initialised")
     
     def setup_network(self):
-        import os
-        import socket
-        from datetime import timedelta
+    import socket
+    from datetime import timedelta
 
-        my_hostname = socket.gethostname()
+    print(f"[Worker {self.rank}] Connecting to master...")
+    print(f"  Hostname   : {socket.gethostname()}")
+    print(f"  MASTER_IP  : {MASTER_IP}")
+    print(f"  PORT       : {MASTER_PORT}")
+    print(f"  Rank       : {self.rank}")
+    print(f"  World size : {self.world_size}")
 
-    # Worker machine hostname = DESKTOP-KLCIT5U → use WORKER_IP
-    # This is needed so gloo binds to correct adapter
-        from config import WORKER_IP
-        if my_hostname == "DESKTOP-KLCIT5U":
-            my_ip = WORKER_IP
-        else:
-            my_ip = WORKER_IP   # default to WORKER_IP for any worker
+    # env vars already set in main.py before torch import
+    dist.init_process_group(
+        backend     = "gloo",
+        init_method = "env://",
+        world_size  = self.world_size,
+        rank        = self.rank,
+        timeout     = timedelta(seconds=120)
+    )
 
-    # ── Patch socket to return correct IP ─────────────────
-        _real_getaddrinfo = socket.getaddrinfo
-        def _patched_getaddrinfo(host, port, *args, **kwargs):
-            if host == my_hostname:
-                host = my_ip
-            return _real_getaddrinfo(host, port, *args, **kwargs)
-        socket.getaddrinfo = _patched_getaddrinfo
-
-        _real_gethostbyname = socket.gethostbyname
-        def _patched_gethostbyname(host):
-            if host == my_hostname:
-                return my_ip
-            return _real_gethostbyname(host)
-        socket.gethostbyname = _patched_gethostbyname
-
-    # ── Environment variables ──────────────────────────────
-        os.environ["MASTER_ADDR"]        = MASTER_IP
-        os.environ["MASTER_PORT"]        = str(MASTER_PORT)
-        os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
-        os.environ["USE_LIBUV"]          = "0"
-
-        print(f"[Worker {self.rank}] Connecting to master...")
-        print(f"  Hostname   : {my_hostname}")
-        print(f"  My IP      : {my_ip}")
-        print(f"  MASTER_IP  : {MASTER_IP}")
-        print(f"  PORT       : {MASTER_PORT}")
-        print(f"  Interface  : {GLOO_SOCKET_IFNAME}")
-        print(f"  Rank       : {self.rank}")
-        print(f"  World size : {self.world_size}")
-
-        dist.init_process_group(
-            backend     = "gloo",
-            init_method = "env://",
-            world_size  = self.world_size,
-            rank        = self.rank,
-            timeout     = timedelta(seconds=120)
-        )
-
-        print(f"[Worker {self.rank}] Connected ✅")
+    print(f"[Worker {self.rank}] Connected ✅")
 
     def receive_assignment(self):
         """
