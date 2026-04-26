@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.optim as optim
 import torch.distributed as dist
 import os
+import socket
+import traceback
 
 from config import (
     MASTER_IP, MASTER_PORT,
@@ -70,13 +72,39 @@ class Worker:
             print(f"  IFACE      : {GLOO_SOCKET_IFNAME}")
         print(f"  Rank       : {self.rank}")
         print(f"  World size : {self.world_size}")
+        print(f"  Hostname   : {socket.gethostname()}")
+        try:
+            print(f"  Host IP    : {socket.gethostbyname(socket.gethostname())}")
+        except Exception:
+            pass
 
-        dist.init_process_group(
-            backend     = "gloo",
-            init_method = init_url,
-            world_size  = self.world_size,
-            rank        = self.rank
-        )
+        try:
+            dist.init_process_group(
+                backend     = "gloo",
+                init_method = init_url,
+                world_size  = self.world_size,
+                rank        = self.rank
+            )
+        except Exception as e:
+            print(f"[Worker {self.rank}] init_process_group failed: {repr(e)}")
+            print(traceback.format_exc())
+            if GLOO_SOCKET_IFNAME and "GLOO_SOCKET_IFNAME" in os.environ:
+                print(f"[Worker {self.rank}] Init failed with pinned interface.")
+                print(f"[Worker {self.rank}] Retrying without GLOO_SOCKET_IFNAME...")
+                del os.environ["GLOO_SOCKET_IFNAME"]
+                try:
+                    dist.init_process_group(
+                        backend     = "gloo",
+                        init_method = init_url,
+                        world_size  = self.world_size,
+                        rank        = self.rank
+                    )
+                except Exception as retry_e:
+                    print(f"[Worker {self.rank}] Retry failed: {repr(retry_e)}")
+                    print(traceback.format_exc())
+                    raise retry_e
+            else:
+                raise e
 
         print(f"[Worker {self.rank}] Network connected ✅")
 

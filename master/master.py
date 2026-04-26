@@ -3,6 +3,8 @@ import torch.distributed as dist
 import torch.optim as optim
 import time
 import os
+import socket
+import traceback
 
 from config import (
     MASTER_IP, MASTER_PORT, MAX_WORKERS,
@@ -61,13 +63,39 @@ class Master:
       if GLOO_SOCKET_IFNAME:
           print(f"  IFACE      : {GLOO_SOCKET_IFNAME}")
       print(f"  World size : {world_size}")
+      print(f"  Hostname   : {socket.gethostname()}")
+      try:
+          print(f"  Host IP    : {socket.gethostbyname(socket.gethostname())}")
+      except Exception:
+          pass
 
-      dist.init_process_group(
-         backend="gloo",
-         init_method=init_url,
-         world_size=world_size,
-         rank=0
-      )
+      try:
+          dist.init_process_group(
+             backend="gloo",
+             init_method=init_url,
+             world_size=world_size,
+             rank=0
+          )
+      except Exception as e:
+          print(f"[Master] init_process_group failed: {repr(e)}")
+          print(traceback.format_exc())
+          if GLOO_SOCKET_IFNAME and "GLOO_SOCKET_IFNAME" in os.environ:
+              print("[Master] Init failed with pinned interface.")
+              print("[Master] Retrying without GLOO_SOCKET_IFNAME...")
+              del os.environ["GLOO_SOCKET_IFNAME"]
+              try:
+                  dist.init_process_group(
+                     backend="gloo",
+                     init_method=init_url,
+                     world_size=world_size,
+                     rank=0
+                  )
+              except Exception as retry_e:
+                  print(f"[Master] Retry failed: {repr(retry_e)}")
+                  print(traceback.format_exc())
+                  raise retry_e
+          else:
+              raise e
       print("[Master] Network ready ✅")
 
     def wait_for_workers(self):
