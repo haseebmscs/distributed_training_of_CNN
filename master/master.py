@@ -50,23 +50,21 @@ class Master:
               f"{MIN_WORKERS} workers...")
     
     def setup_network(self, world_size):
-      os.environ["MASTER_ADDR"] = MASTER_IP
-      os.environ["MASTER_PORT"] = str(MASTER_PORT)
+      init_url = f"tcp://{MASTER_IP}:{MASTER_PORT}"
       if GLOO_SOCKET_IFNAME:
           os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
       elif "GLOO_SOCKET_IFNAME" in os.environ:
           del os.environ["GLOO_SOCKET_IFNAME"]
 
       print(f"[Master] Setting up network...")
-      print(f"  MASTER_ADDR: {MASTER_IP}")
-      print(f"  MASTER_PORT: {MASTER_PORT}")
+      print(f"  URL        : {init_url}")
       if GLOO_SOCKET_IFNAME:
           print(f"  IFACE      : {GLOO_SOCKET_IFNAME}")
       print(f"  World size : {world_size}")
 
       dist.init_process_group(
          backend="gloo",
-         init_method="env://",
+         init_method=init_url,
          world_size=world_size,
          rank=0
       )

@@ -10,7 +10,7 @@ GLOO_SOCKET_IFNAME = "Wi-Fi"
 # ── Worker Limits ─────────────────────────────
 MAX_WORKERS  = 50  # max machines that can connect
 MAX_ACTIVE   = 5   # max active pipeline stages
-MIN_WORKERS  = 2   # minimum to start training
+MIN_WORKERS  = 1  # minimum to start training
 
 # ── Training Settings ─────────────────────────
 EPOCHS       = 10
