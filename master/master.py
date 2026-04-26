@@ -87,10 +87,10 @@ class Master:
         )
 
         dist.init_process_group(
-            backend    = "gloo",
-            store      = store,
-            world_size = world_size,
-            rank       = 0
+          backend="gloo",
+          init_method=f"tcp://{MASTER_IP}:{MASTER_PORT}",
+          rank=0,
+          world_size=world_size
         )
 
         print("[Master] Network ready ✅")

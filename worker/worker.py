@@ -2,7 +2,6 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.distributed as dist
-import os
 import socket
 import traceback
 from datetime import timedelta
@@ -29,6 +28,9 @@ from utils.checkpoint  import (
     save_checkpoint, load_checkpoint,
     find_latest_checkpoint, should_save
 )
+import os
+
+
 
 class Worker:
     """
@@ -61,7 +63,6 @@ class Worker:
         print(f"[Worker {rank}] Initialised")
     
     def setup_network(self):
-        import os
         import socket
 
         os.environ["MASTER_ADDR"] = MASTER_IP
@@ -78,17 +79,18 @@ class Worker:
         print(f"  Hostname   : {socket.gethostname()}")
 
         store = dist.TCPStore(
-            host_name  = MASTER_IP,
+            host_name  = "10.236.188.44",
             port       = MASTER_PORT,
             world_size = self.world_size,
             is_master  = False,
             timeout    = timedelta(seconds=120),
             use_libuv  = False
         )
-
+        print(f"store : {store}")
         dist.init_process_group(
             backend    = "gloo",
-            store      = store,
+            init_method=f"tcp://{MASTER_IP}:{MASTER_PORT}",
+            
             world_size = self.world_size,
             rank       = self.rank
         )
