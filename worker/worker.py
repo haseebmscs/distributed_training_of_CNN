@@ -5,6 +5,7 @@ import torch.distributed as dist
 import os
 import socket
 import traceback
+from datetime import timedelta
 
 from config import (
     MASTER_IP, MASTER_PORT,
@@ -60,54 +61,41 @@ class Worker:
         print(f"[Worker {rank}] Initialised")
     
     def setup_network(self):
-        libuv_query = "?use_libuv=0" if not USE_LIBUV else ""
-        init_url = f"tcp://{MASTER_IP}:{MASTER_PORT}{libuv_query}"
-        if GLOO_SOCKET_IFNAME:
-            os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
-        elif "GLOO_SOCKET_IFNAME" in os.environ:
-            del os.environ["GLOO_SOCKET_IFNAME"]
+        import os
+        import socket
 
-        print(f"[Worker {self.rank}] Connecting to network...")
-        print(f"  URL        : {init_url}")
-        if GLOO_SOCKET_IFNAME:
-            print(f"  IFACE      : {GLOO_SOCKET_IFNAME}")
+        os.environ["MASTER_ADDR"] = MASTER_IP
+        os.environ["MASTER_PORT"] = str(MASTER_PORT)
+        os.environ["USE_LIBUV"]   = "0"
+        os.environ["GLOO_SOCKET_IFNAME"] = "Wi-Fi"
+        os.environ["TP_SOCKET_IFNAME"]   = "Wi-Fi"
+
+        print(f"[Worker {self.rank}] Connecting...")
+        print(f"  MASTER_IP  : {MASTER_IP}")
+        print(f"  PORT       : {MASTER_PORT}")
         print(f"  Rank       : {self.rank}")
         print(f"  World size : {self.world_size}")
         print(f"  Hostname   : {socket.gethostname()}")
-        try:
-            print(f"  Host IP    : {socket.gethostbyname(socket.gethostname())}")
-        except Exception:
-            pass
 
-        try:
-            dist.init_process_group(
-                backend     = "gloo",
-                init_method = init_url,
-                world_size  = self.world_size,
-                rank        = self.rank
-            )
-        except Exception as e:
-            print(f"[Worker {self.rank}] init_process_group failed: {repr(e)}")
-            print(traceback.format_exc())
-            if GLOO_SOCKET_IFNAME and "GLOO_SOCKET_IFNAME" in os.environ:
-                print(f"[Worker {self.rank}] Init failed with pinned interface.")
-                print(f"[Worker {self.rank}] Retrying without GLOO_SOCKET_IFNAME...")
-                del os.environ["GLOO_SOCKET_IFNAME"]
-                try:
-                    dist.init_process_group(
-                        backend     = "gloo",
-                        init_method = init_url,
-                        world_size  = self.world_size,
-                        rank        = self.rank
-                    )
-                except Exception as retry_e:
-                    print(f"[Worker {self.rank}] Retry failed: {repr(retry_e)}")
-                    print(traceback.format_exc())
-                    raise retry_e
-            else:
-                raise e
+        store = dist.TCPStore(
+            host_name  = MASTER_IP,
+            port       = MASTER_PORT,
+            world_size = self.world_size,
+            is_master  = False,
+            timeout    = timedelta(seconds=120),
+            use_libuv  = False
+        )
 
-        print(f"[Worker {self.rank}] Network connected ✅")
+        dist.init_process_group(
+            backend    = "gloo",
+            store      = store,
+            world_size = self.world_size,
+            rank       = self.rank
+        )
+
+        print(f"[Worker {self.rank}] Connected ✅")
+
+
 
     def receive_assignment(self):
         """

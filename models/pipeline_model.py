@@ -80,7 +80,7 @@ def split_model(num_workers):
     Splits the CNN into num_workers stages automatically.
 
     Args:
-        num_workers (int): number of active workers (2 to 5)
+        num_workers (int): number of active workers (1 to 5)
 
     Returns:
         stages (list of PipelineStage): one stage per worker
@@ -94,7 +94,7 @@ def split_model(num_workers):
 
     # Safety check — cap at MAX_ACTIVE
     num_workers = min(num_workers, MAX_ACTIVE)
-    num_workers = max(num_workers, 2)
+    num_workers = max(num_workers, 1)
 
     # All 5 building blocks in order
     all_units = [
@@ -109,6 +109,7 @@ def split_model(num_workers):
     # Key = num_workers
     # Value = list of lists (which unit indices go to which stage)
     split_plan = {
+        1: [[0, 1, 2, 3, 4]],
         2: [[0, 1, 2], [3, 4]],
         3: [[0, 1],    [2, 3], [4]],
         4: [[0, 1],    [2],    [3], [4]],
