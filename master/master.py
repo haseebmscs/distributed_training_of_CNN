@@ -9,7 +9,7 @@ import traceback
 from config import (
     MASTER_IP, MASTER_PORT, MAX_WORKERS,
     EPOCHS, BATCH_SIZE, LEARNING_RATE, MIN_WORKERS,
-    HEARTBEAT_ENABLED, GLOO_SOCKET_IFNAME
+    HEARTBEAT_ENABLED, GLOO_SOCKET_IFNAME, USE_LIBUV
 )
 from master.registry   import WorkerRegistry
 from master.scheduler  import Scheduler
@@ -52,7 +52,8 @@ class Master:
               f"{MIN_WORKERS} workers...")
     
     def setup_network(self, world_size):
-      init_url = f"tcp://{MASTER_IP}:{MASTER_PORT}"
+    libuv_query = "?use_libuv=0" if not USE_LIBUV else ""
+    init_url = f"tcp://{MASTER_IP}:{MASTER_PORT}{libuv_query}"
       if GLOO_SOCKET_IFNAME:
           os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
       elif "GLOO_SOCKET_IFNAME" in os.environ:

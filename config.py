@@ -6,6 +6,9 @@ MASTER_PORT = 29601
 # Optional network interface pinning for gloo backend.
 # Example (Windows): GLOO_SOCKET_IFNAME=Wi-Fi
 GLOO_SOCKET_IFNAME = "Wi-Fi"
+# Disable libuv rendezvous path on Windows to reduce hostname
+# resolution issues when multiple adapters are present.
+USE_LIBUV = False
 
 # ── Worker Limits ─────────────────────────────
 MAX_WORKERS  = 50  # max machines that can connect

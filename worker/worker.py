@@ -9,7 +9,7 @@ import traceback
 from config import (
     MASTER_IP, MASTER_PORT,
     EPOCHS, LEARNING_RATE, HEARTBEAT_ENABLED,
-    GLOO_SOCKET_IFNAME
+    GLOO_SOCKET_IFNAME, USE_LIBUV
 )
 from models.pipeline_model import split_model, PipelineStage
 from comm.comm_utils import (
@@ -60,7 +60,8 @@ class Worker:
         print(f"[Worker {rank}] Initialised")
     
     def setup_network(self):
-        init_url = f"tcp://{MASTER_IP}:{MASTER_PORT}"
+        libuv_query = "?use_libuv=0" if not USE_LIBUV else ""
+        init_url = f"tcp://{MASTER_IP}:{MASTER_PORT}{libuv_query}"
         if GLOO_SOCKET_IFNAME:
             os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
         elif "GLOO_SOCKET_IFNAME" in os.environ:
