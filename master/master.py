@@ -53,22 +53,37 @@ class Master:
               f"{MIN_WORKERS} workers...")
     
     def setup_network(self, world_size):
+        import os
         import socket
         from datetime import timedelta
 
-        print(f"  Hostname   : {socket.gethostname()}")
+        os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
+        os.environ["USE_LIBUV"]          = "0"
+
         print(f"[Master] Setting up network...")
+        print(f"  Hostname   : {socket.gethostname()}")
         print(f"  MASTER_IP  : {MASTER_IP}")
         print(f"  PORT       : {MASTER_PORT}")
         print(f"  World size : {world_size}")
 
-    # env vars already set in main.py before torch import
+    # TCPStore passes IP directly to C++ — bypasses
+    # hostname resolution completely
+        store = dist.TCPStore(
+            host_name        = MASTER_IP,  # raw IP → no DNS lookup
+            port             = MASTER_PORT,
+            world_size       = world_size,
+            is_master        = True,
+            timeout          = timedelta(seconds=120),
+            wait_for_workers = True,
+            use_libuv        = False
+        )
+
         dist.init_process_group(
-            backend     = "gloo",
-            init_method = "env://",
-            world_size  = world_size,
-            rank        = 0,
-            timeout     = timedelta(seconds=120)
+            backend    = "gloo",
+            store      = store,
+            world_size = world_size,
+            rank       = 0
+            # NO init_method — store already handles rendezvous
         )
 
         print("[Master] Network ready ✅")

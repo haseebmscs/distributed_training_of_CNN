@@ -63,26 +63,45 @@ class Worker:
         print(f"[Worker {rank}] Initialised")
     
     def setup_network(self):
-    import socket
-    from datetime import timedelta
+        import os
+        import socket
+        from datetime import timedelta
 
-    print(f"[Worker {self.rank}] Connecting to master...")
-    print(f"  Hostname   : {socket.gethostname()}")
-    print(f"  MASTER_IP  : {MASTER_IP}")
-    print(f"  PORT       : {MASTER_PORT}")
-    print(f"  Rank       : {self.rank}")
-    print(f"  World size : {self.world_size}")
+        os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
+        os.environ["USE_LIBUV"]          = "0"
 
-    # env vars already set in main.py before torch import
-    dist.init_process_group(
-        backend     = "gloo",
-        init_method = "env://",
-        world_size  = self.world_size,
-        rank        = self.rank,
-        timeout     = timedelta(seconds=120)
-    )
+    # Force gloo C++ to bind to worker's WiFi IP
+    # This is the KEY — without this gloo picks vEthernet
+        os.environ["GLOO_SOCKET_IFNAME"] = "Wi-Fi"
+        os.environ["TP_SOCKET_IFNAME"]   = "Wi-Fi"
 
-    print(f"[Worker {self.rank}] Connected ✅")
+        print(f"[Worker {self.rank}] Connecting to master...")
+        print(f"  Hostname   : {socket.gethostname()}")
+        print(f"  MASTER_IP  : {MASTER_IP}")
+        print(f"  PORT       : {MASTER_PORT}")
+        print(f"  Rank       : {self.rank}")
+        print(f"  World size : {self.world_size}")
+
+    # Worker also uses TCPStore pointing to MASTER_IP
+    # is_master=False means "connect to" not "listen on"
+        store = dist.TCPStore(
+            host_name  = MASTER_IP,  # raw IP → connect directly
+            port       = MASTER_PORT,
+            world_size = self.world_size,
+            is_master  = False,
+            timeout    = timedelta(seconds=120),
+            use_libuv  = False
+        )
+
+        dist.init_process_group(
+            backend    = "gloo",
+            store      = store,
+            world_size = self.world_size,
+            rank       = self.rank
+            # NO init_method — store handles everything
+        )
+
+        print(f"[Worker {self.rank}] Connected ✅")
 
     def receive_assignment(self):
         """
