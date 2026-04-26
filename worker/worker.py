@@ -63,41 +63,59 @@ class Worker:
         print(f"[Worker {rank}] Initialised")
     
     def setup_network(self):
+        import os
         import socket
+        from datetime import timedelta
 
-        os.environ["MASTER_ADDR"] = MASTER_IP
-        os.environ["MASTER_PORT"] = str(MASTER_PORT)
-        os.environ["USE_LIBUV"]   = "0"
-        os.environ["GLOO_SOCKET_IFNAME"] = "Wi-Fi"
-        os.environ["TP_SOCKET_IFNAME"]   = "Wi-Fi"
+        my_hostname = socket.gethostname()
 
-        print(f"[Worker {self.rank}] Connecting...")
+    # Worker machine hostname = DESKTOP-KLCIT5U → use WORKER_IP
+    # This is needed so gloo binds to correct adapter
+        from config import WORKER_IP
+        if my_hostname == "DESKTOP-KLCIT5U":
+            my_ip = WORKER_IP
+        else:
+            my_ip = WORKER_IP   # default to WORKER_IP for any worker
+
+    # ── Patch socket to return correct IP ─────────────────
+        _real_getaddrinfo = socket.getaddrinfo
+        def _patched_getaddrinfo(host, port, *args, **kwargs):
+            if host == my_hostname:
+                host = my_ip
+            return _real_getaddrinfo(host, port, *args, **kwargs)
+        socket.getaddrinfo = _patched_getaddrinfo
+
+        _real_gethostbyname = socket.gethostbyname
+        def _patched_gethostbyname(host):
+            if host == my_hostname:
+                return my_ip
+            return _real_gethostbyname(host)
+        socket.gethostbyname = _patched_gethostbyname
+
+    # ── Environment variables ──────────────────────────────
+        os.environ["MASTER_ADDR"]        = MASTER_IP
+        os.environ["MASTER_PORT"]        = str(MASTER_PORT)
+        os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
+        os.environ["USE_LIBUV"]          = "0"
+
+        print(f"[Worker {self.rank}] Connecting to master...")
+        print(f"  Hostname   : {my_hostname}")
+        print(f"  My IP      : {my_ip}")
         print(f"  MASTER_IP  : {MASTER_IP}")
         print(f"  PORT       : {MASTER_PORT}")
+        print(f"  Interface  : {GLOO_SOCKET_IFNAME}")
         print(f"  Rank       : {self.rank}")
         print(f"  World size : {self.world_size}")
-        print(f"  Hostname   : {socket.gethostname()}")
 
-        store = dist.TCPStore(
-            host_name  = "10.236.188.44",
-            port       = MASTER_PORT,
-            world_size = self.world_size,
-            is_master  = False,
-            timeout    = timedelta(seconds=120),
-            use_libuv  = False
-        )
-        print(f"store : {store}")
         dist.init_process_group(
-            backend    = "gloo",
-            init_method=f"tcp://{MASTER_IP}:{MASTER_PORT}",
-            
-            world_size = self.world_size,
-            rank       = self.rank
+            backend     = "gloo",
+            init_method = "env://",
+            world_size  = self.world_size,
+            rank        = self.rank,
+            timeout     = timedelta(seconds=120)
         )
 
         print(f"[Worker {self.rank}] Connected ✅")
-
-
 
     def receive_assignment(self):
         """

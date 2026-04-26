@@ -55,47 +55,57 @@ class Master:
     def setup_network(self, world_size):
         import os
         import socket
+        from datetime import timedelta
 
-        # ── Force correct IP before anything else ─────────
-        os.environ["MASTER_ADDR"] = MASTER_IP
-        os.environ["MASTER_PORT"] = str(MASTER_PORT)
-        os.environ["USE_LIBUV"]   = "0"
+        my_hostname = socket.gethostname()
 
-    # Force gloo to use Wi-Fi adapter
-        os.environ["GLOO_SOCKET_IFNAME"] = "Wi-Fi"
+        # Decide which IP this machine should use
+    # Master hostname = Haris → use MASTER_IP
+        if my_hostname == "Haris":
+            my_ip = MASTER_IP
+        else:
+            my_ip = MASTER_IP   # master always uses MASTER_IP
 
-    # This is the KEY fix — tell gloo exactly which
-    # IP to bind to, not just which interface
-        os.environ["TP_SOCKET_IFNAME"] = "Wi-Fi"
+    # ── Patch socket to return correct IP ─────────────────
+    # Gloo internally calls getaddrinfo(hostname)
+    # We intercept it and return the correct WiFi IP
+        _real_getaddrinfo = socket.getaddrinfo
+        def _patched_getaddrinfo(host, port, *args, **kwargs):
+            if host == my_hostname:
+                host = my_ip
+            return _real_getaddrinfo(host, port, *args, **kwargs)
+        socket.getaddrinfo = _patched_getaddrinfo
+
+        _real_gethostbyname = socket.gethostbyname
+        def _patched_gethostbyname(host):
+            if host == my_hostname:
+                return my_ip
+            return _real_gethostbyname(host)
+        socket.gethostbyname = _patched_gethostbyname
+
+    # ── Environment variables ──────────────────────────────
+        os.environ["MASTER_ADDR"]        = MASTER_IP
+        os.environ["MASTER_PORT"]        = str(MASTER_PORT)
+        os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
+        os.environ["USE_LIBUV"]          = "0"
 
         print(f"[Master] Setting up network...")
+        print(f"  Hostname   : {my_hostname}")
+        print(f"  My IP      : {my_ip}")
         print(f"  MASTER_IP  : {MASTER_IP}")
         print(f"  PORT       : {MASTER_PORT}")
-        print(f"  Interface  : Wi-Fi")
+        print(f"  Interface  : {GLOO_SOCKET_IFNAME}")
         print(f"  World size : {world_size}")
-        print(f"  Hostname   : {socket.gethostname()}")
-
-    # Use TCPStore with explicit IP binding
-        store = dist.TCPStore(
-            host_name      = MASTER_IP,
-            port           = MASTER_PORT,
-            world_size     = world_size,
-            is_master      = True,
-            timeout        = timedelta(seconds=120),
-            wait_for_workers = True,
-            use_libuv      = False
-        )
 
         dist.init_process_group(
-          backend="gloo",
-          init_method=f"tcp://{MASTER_IP}:{MASTER_PORT}",
-          rank=0,
-          world_size=world_size
+            backend     = "gloo",
+            init_method = "env://",
+            world_size  = world_size,
+            rank        = 0,
+            timeout     = timedelta(seconds=120)
         )
 
         print("[Master] Network ready ✅")
-
-
 
     def wait_for_workers(self):
         """
