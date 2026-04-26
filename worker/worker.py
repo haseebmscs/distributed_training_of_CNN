@@ -58,29 +58,25 @@ class Worker:
         print(f"[Worker {rank}] Initialised")
     
     def setup_network(self):
-        """
-        Connects this worker to the distributed network.
-        """
-        os.environ["MASTER_ADDR"] = MASTER_IP
-        os.environ["MASTER_PORT"] = str(MASTER_PORT)
-        if GLOO_SOCKET_IFNAME:
-            os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
+    import os
+    os.environ["MASTER_ADDR"] = MASTER_IP
+    os.environ["MASTER_PORT"] = str(MASTER_PORT)
+    os.environ["GLOO_SOCKET_IFNAME"] = "Wi-Fi"
 
-        print(f"[Worker {self.rank}] Connecting to network...")
-        print(f"  URL        : tcp://{MASTER_IP}:{MASTER_PORT}")
-        if GLOO_SOCKET_IFNAME:
-            print(f"  IFACE      : {GLOO_SOCKET_IFNAME}")
-        print(f"  Rank       : {self.rank}")
-        print(f"  World size : {self.world_size}")
+    print(f"[Worker {self.rank}] Connecting to network...")
+    print(f"  MASTER_ADDR: {MASTER_IP}")
+    print(f"  MASTER_PORT: {MASTER_PORT}")
+    print(f"  Rank       : {self.rank}")
+    print(f"  World size : {self.world_size}")
 
-        dist.init_process_group(
-            backend     = "gloo",
-            init_method = "env://",
-            world_size  = self.world_size,
-            rank        = self.rank
-        )
+    dist.init_process_group(
+        backend     = "gloo",
+        init_method = "env://",
+        world_size  = self.world_size,
+        rank        = self.rank
+    )
 
-        print(f"[Worker {self.rank}] Network connected ✅")
+    print(f"[Worker {self.rank}] Network connected ✅")
 
     def receive_assignment(self):
         """

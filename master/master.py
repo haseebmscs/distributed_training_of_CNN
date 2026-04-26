@@ -50,33 +50,22 @@ class Master:
               f"{MIN_WORKERS} workers...")
     
     def setup_network(self, world_size):
-        """
-        Initialises torch.distributed so all machines
-        can communicate with each other.
+      os.environ["MASTER_ADDR"] = MASTER_IP
+      os.environ["MASTER_PORT"] = str(MASTER_PORT)
+      os.environ["GLOO_SOCKET_IFNAME"] = "Wi-Fi"
 
-        Args:
-            world_size (int): total machines
-                              (1 master + N workers)
-        """
-        os.environ["MASTER_ADDR"] = MASTER_IP
-        os.environ["MASTER_PORT"] = str(MASTER_PORT)
-        if GLOO_SOCKET_IFNAME:
-            os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
+      print(f"[Master] Setting up network...")
+      print(f"  MASTER_ADDR: {MASTER_IP}")
+      print(f"  MASTER_PORT: {MASTER_PORT}")
+      print(f"  World size : {world_size}")
 
-        print(f"[Master] Setting up network...")
-        print(f"  URL        : tcp://{MASTER_IP}:{MASTER_PORT}")
-        if GLOO_SOCKET_IFNAME:
-            print(f"  IFACE      : {GLOO_SOCKET_IFNAME}")
-        print(f"  World size : {world_size}")
-
-        dist.init_process_group(
-            backend     = "gloo",
-            init_method = "env://",
-            world_size  = world_size,
-            rank        = 0        # Master is always rank 0
-        )
-
-        print("[Master] Network ready ✅")
+      dist.init_process_group(
+         backend="gloo",
+         init_method="env://",
+         world_size=world_size,
+         rank=0
+      )
+      print("[Master] Network ready ✅")
 
     def wait_for_workers(self):
         """

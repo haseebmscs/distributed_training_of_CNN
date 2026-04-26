@@ -1,7 +1,7 @@
 # ── Network Settings ──────────────────────────
 # For single-machine testing use 127.0.0.1.
 # For multi-machine runs set MASTER_IP to the master's LAN IP.
-MASTER_IP   = "10.66.68.44"
+MASTER_IP   = "10.236.188.44"
 MASTER_PORT = 29601
 # Optional network interface pinning for gloo backend.
 # Example (Windows): GLOO_SOCKET_IFNAME=Wi-Fi
