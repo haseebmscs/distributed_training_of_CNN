@@ -8,7 +8,8 @@ import traceback
 from datetime import timedelta
 
 from config import (
-    MASTER_IP, MASTER_PORT, MAX_WORKERS,
+    MASTER_IP, MASTER_PORT, MASTER_BOOTSTRAP_PORT,
+    MAX_WORKERS,
     EPOCHS, BATCH_SIZE, LEARNING_RATE, MIN_WORKERS,
     HEARTBEAT_ENABLED, GLOO_SOCKET_IFNAME, USE_LIBUV
 )
@@ -16,13 +17,14 @@ from master.registry   import WorkerRegistry
 from master.scheduler  import Scheduler
 from utils.logger      import TrainingLogger
 from comm.heartbeat    import HeartbeatMonitor
+from comm.bootstrap    import MasterBootstrapServer
 from comm.comm_utils   import (
     send_signal, recv_signal,
     send_tensor, recv_metrics
 )
 from comm.signals      import (
     SIGNAL_START, SIGNAL_STOP,
-    SIGNAL_NEXT,  SIGNAL_HELLO
+    SIGNAL_NEXT
 )
 from dataset.custom_dataset import get_dataloaders
 
@@ -43,6 +45,7 @@ class Master:
         self.scheduler = Scheduler(self.registry)
         self.logger    = TrainingLogger()
         self.monitor   = None   # built after workers join
+        self.bootstrap = None
 
         # DataLoaders — only Master loads data
         self.train_loader = None
@@ -51,11 +54,18 @@ class Master:
         print("[Master] Initialised")
         print(f"[Master] Waiting for minimum "
               f"{MIN_WORKERS} workers...")
+
+    def _on_worker_assigned(self, rank, peer_info):
+        if self.registry.register(rank):
+            hostname = peer_info.get("hostname", "unknown")
+            local_ip = peer_info.get("local_ip", "unknown")
+            self.logger.log_worker_joined(rank)
+            self.logger.log_event(
+                f"Bootstrap worker rank {rank} joined from {hostname} ({local_ip})"
+            )
     
     def setup_network(self, world_size):
-        import os
         import socket
-        from datetime import timedelta
 
         os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
         os.environ["USE_LIBUV"]          = "0"
@@ -66,64 +76,26 @@ class Master:
         print(f"  PORT       : {MASTER_PORT}")
         print(f"  World size : {world_size}")
 
-    # TCPStore passes IP directly to C++ — bypasses
-    # hostname resolution completely
-        store = dist.TCPStore(
-            host_name        = MASTER_IP,  # raw IP → no DNS lookup
-            port             = MASTER_PORT,
-            world_size       = world_size,
-            is_master        = True,
-            timeout          = timedelta(seconds=120),
-            wait_for_workers = True,
-            use_libuv        = False
-        )
-
         dist.init_process_group(
             backend    = "gloo",
-            store      = store,
+            init_method = f"tcp://{MASTER_IP}:{MASTER_PORT}",
             world_size = world_size,
             rank       = 0
-            # NO init_method — store already handles rendezvous
         )
 
         print("[Master] Network ready ✅")
 
     def wait_for_workers(self):
-        """
-        Listens for SIGNAL_HELLO from workers.
-        Each hello = one worker has connected.
-        Keeps listening until MIN_WORKERS joined.
-        Then waits a few more seconds for late joiners.
-
-        Returns:
-            total_workers (int): how many workers joined
-        """
-        print(f"\n[Master] Listening for workers...")
-
-        # Keep receiving HELLO signals until MIN_WORKERS join
-        # Then wait 5 more seconds for late joiners
-        while True:
-            signal_val = recv_signal(src=None)
-
-            if signal_val == SIGNAL_HELLO.item():
-                # A new worker connected!
-                # Assign next available rank
-                new_rank = self.registry.count_total() + 1
-                self.registry.register(new_rank)
-                self.logger.log_worker_joined(new_rank)
-
-                total = self.registry.count_total()
-                print(f"[Master] Worker joined! "
-                      f"Total: {total}/{MIN_WORKERS} minimum")
-
-            # Check if we have enough to start
-            if self.registry.is_ready_to_train():
-                print(f"[Master] Minimum workers reached!")
-                print(f"[Master] Waiting 5s for late joiners...")
-                time.sleep(5)   # grace period for more workers
-                break
+        if self.bootstrap:
+            print("[Master] Waiting for bootstrap workers to join...")
+            self.bootstrap.wait_until_complete(timeout=120)
 
         total = self.registry.count_total()
+        if total < MIN_WORKERS:
+            raise RuntimeError(
+                f"Only {total} workers joined; need at least {MIN_WORKERS}"
+            )
+
         print(f"[Master] {total} workers ready!")
         return total
 
@@ -250,16 +222,28 @@ class Master:
             world_size (int): total machines (master + workers)
         """
 
-        # ── Step 1: Connect network ────────────────────────
+        expected_workers = max(world_size - 1, 0)
+
+        # ── Step 1: Start bootstrap server ────────────────
+        self.bootstrap = MasterBootstrapServer(
+            expected_workers  = expected_workers,
+            host             = "0.0.0.0",
+            port             = MASTER_BOOTSTRAP_PORT,
+            on_worker_assigned = self._on_worker_assigned,
+            timeout          = 120
+        )
+        self.bootstrap.start()
+
+        # ── Step 2: Connect network ────────────────────────
         self.setup_network(world_size)
 
-        # ── Step 2: Wait for workers ───────────────────────
+        # ── Step 3: Wait for workers ───────────────────────
         total_workers = self.wait_for_workers()
 
-        # ── Step 3: Assign stages ──────────────────────────
+        # ── Step 4: Assign stages ──────────────────────────
         stages = self.scheduler.assign_stages()
 
-        # ── Step 4: Start heartbeat monitor ───────────────
+        # ── Step 5: Start heartbeat monitor ───────────────
         active_ranks = self.registry.get_active_ranks()
         if HEARTBEAT_ENABLED:
             self.monitor = HeartbeatMonitor(
@@ -270,18 +254,18 @@ class Master:
         else:
             print("[Master] Heartbeat monitor disabled")
 
-        # ── Step 5: Load dataset ───────────────────────────
+        # ── Step 6: Load dataset ───────────────────────────
         print("\n[Master] Loading CIFAR-10 dataset...")
         self.train_loader, self.test_loader = get_dataloaders()
 
-        # ── Step 6: Log training start ─────────────────────
+        # ── Step 7: Log training start ─────────────────────
         self.logger.log_training_start(
             num_workers = total_workers,
             num_stages  = len(stages),
             epochs      = EPOCHS
         )
 
-        # ── Step 7: Training loop ──────────────────────────
+        # ── Step 8: Training loop ──────────────────────────
         print(f"\n[Master] Starting training "
               f"for {EPOCHS} epochs...\n")
 
@@ -300,7 +284,7 @@ class Master:
             # Print registry status every epoch
             self.registry.print_status()
 
-        # ── Step 8: Stop all workers ───────────────────────
+        # ── Step 9: Stop all workers ───────────────────────
         print("\n[Master] Training complete!")
         print("[Master] Sending STOP to all workers...")
 
@@ -310,11 +294,14 @@ class Master:
         for rank in self.registry.get_standby_ranks():
             send_signal(SIGNAL_STOP, dst=rank)
 
-        # ── Step 9: Stop monitor ───────────────────────────
+        # ── Step 10: Stop monitor ──────────────────────────
         if self.monitor:
             self.monitor.stop()
 
-        # ── Step 10: Final summary ─────────────────────────
+        if self.bootstrap:
+            self.bootstrap.stop()
+
+        # ── Step 11: Final summary ─────────────────────────
         self.logger.log_training_complete()
         self.logger.print_summary()
 

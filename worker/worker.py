@@ -65,7 +65,6 @@ class Worker:
     def setup_network(self):
         import os
         import socket
-        from datetime import timedelta
 
         os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
         os.environ["USE_LIBUV"]          = "0"
@@ -82,26 +81,22 @@ class Worker:
         print(f"  Rank       : {self.rank}")
         print(f"  World size : {self.world_size}")
 
-    # Worker also uses TCPStore pointing to MASTER_IP
-    # is_master=False means "connect to" not "listen on"
-        store = dist.TCPStore(
-            host_name  = MASTER_IP,  # raw IP → connect directly
-            port       = MASTER_PORT,
-            world_size = self.world_size,
-            is_master  = False,
-            timeout    = timedelta(seconds=120),
-            use_libuv  = False
-        )
-
         dist.init_process_group(
             backend    = "gloo",
-            store      = store,
+            init_method = f"tcp://{MASTER_IP}:{MASTER_PORT}",
             world_size = self.world_size,
             rank       = self.rank
-            # NO init_method — store handles everything
         )
 
         print(f"[Worker {self.rank}] Connected ✅")
+
+    def _run_with_error_reporting(self, step_name, callback):
+        try:
+            return callback()
+        except Exception:
+            print(f"\n[Worker {self.rank}] {step_name} failed:")
+            print(traceback.format_exc())
+            raise
 
     def receive_assignment(self):
         """
@@ -359,51 +354,58 @@ class Worker:
         Called from run.py on each worker machine.
         """
 
-        # ── Step 1: Connect to network ─────────────────────
-        self.setup_network()
+        try:
+            # ── Step 1: Connect to network ─────────────────────
+            self._run_with_error_reporting("network setup", self.setup_network)
 
-        # ── Step 2: Announce to Master ─────────────────────
-        print(f"[Worker {self.rank}] Sending HELLO to Master")
-        send_signal(SIGNAL_HELLO, dst=0)
+            # ── Step 2: Announce to Master ─────────────────────
+                # ── Step 2: Receive assignment ─────────────────────
+            # Master sends either:
+            #   assignment tensor → active worker
+            #   SIGNAL_STANDBY   → standby worker
+            signal_val = recv_signal(src=0)
 
-        # ── Step 3: Receive assignment ─────────────────────
-        # Master sends either:
-        #   assignment tensor → active worker
-        #   SIGNAL_STANDBY   → standby worker
-        signal_val = recv_signal(src=0)
+            if signal_val == SIGNAL_STANDBY.item():
+                # Put in standby mode
+                self.is_active = False
+                self.run_standby()
 
-        if signal_val == SIGNAL_STANDBY.item():
-            # Put in standby mode
-            self.is_active = False
-            self.run_standby()
+            elif signal_val == SIGNAL_ASSIGN.item():
+                # Active worker receives assignment payload next.
+                self.receive_assignment()
+                self.is_active    = True
 
-        elif signal_val == SIGNAL_ASSIGN.item():
-            # Active worker receives assignment payload next.
-            self.receive_assignment()
-            self.is_active    = True
+                # ── Step 4: Build CNN stage ────────────────────
+                self.build_stage()
 
-            # ── Step 4: Build CNN stage ────────────────────
-            self.build_stage()
+                # ── Step 5: Start heartbeat ────────────────────
+                if HEARTBEAT_ENABLED:
+                    self.heartbeat = HeartbeatSender(self.rank)
+                    self.heartbeat.start()
 
-            # ── Step 5: Start heartbeat ────────────────────
-            if HEARTBEAT_ENABLED:
-                self.heartbeat = HeartbeatSender(self.rank)
-                self.heartbeat.start()
+                # ── Step 6: Run training loop ──────────────────
+                self.run_active()
 
-            # ── Step 6: Run training loop ──────────────────
-            self.run_active()
+                # ── Step 7: Stop heartbeat ─────────────────────
+                if self.heartbeat:
+                    self.heartbeat.stop()
 
-            # ── Step 7: Stop heartbeat ─────────────────────
-            if self.heartbeat:
-                self.heartbeat.stop()
+            else:
+                raise RuntimeError(
+                    f"[Worker {self.rank}] Unexpected startup signal: "
+                    f"{signal_val}"
+                )
 
-        else:
-            raise RuntimeError(
-                f"[Worker {self.rank}] Unexpected startup signal: "
-                f"{signal_val}"
-            )
-
-        # ── Step 8: Cleanup ────────────────────────────────
-        print(f"[Worker {self.rank}] Cleaning up...")
-        dist.destroy_process_group()
-        print(f"[Worker {self.rank}] Done ✅")
+        except Exception:
+            print(f"\n[Worker {self.rank}] Fatal worker error:")
+            print(traceback.format_exc())
+            raise
+        finally:
+            # ── Step 8: Cleanup ────────────────────────────────
+            print(f"[Worker {self.rank}] Cleaning up...")
+            try:
+                dist.destroy_process_group()
+            except Exception:
+                print(f"[Worker {self.rank}] Process group cleanup failed:")
+                print(traceback.format_exc())
+            print(f"[Worker {self.rank}] Done ✅")
