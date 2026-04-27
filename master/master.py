@@ -66,9 +66,33 @@ class Master:
     
     def setup_network(self, world_size):
         import socket
+        import subprocess
 
-        # On Windows, Gloo has limited interface support; let it auto-detect
-        os.environ["USE_LIBUV"]          = "0"
+        # On Windows, Gloo needs the correct interface name
+        # Find the interface that has MASTER_IP
+        try:
+            result = subprocess.run(
+                ['ipconfig'],
+                capture_output=True,
+                text=True
+            )
+            output = result.stdout
+            
+            # Look for the interface with MASTER_IP
+            lines = output.split('\n')
+            current_adapter = None
+            for line in lines:
+                if 'adapter' in line.lower() and ':' in line:
+                    current_adapter = line.split(':')[0].strip()
+                if MASTER_IP in line and current_adapter:
+                    print(f"[Master] Found {MASTER_IP} on adapter: {current_adapter}")
+                    if "Wi-Fi" in current_adapter or "Ethernet" in current_adapter:
+                        os.environ["GLOO_SOCKET_IFNAME"] = current_adapter
+                    break
+        except Exception as e:
+            print(f"[Master] Warning: Could not auto-detect interface: {e}")
+
+        os.environ["USE_LIBUV"] = "0"
 
         print(f"[Master] Setting up network...")
         print(f"  Hostname   : {socket.gethostname()}")
@@ -80,7 +104,8 @@ class Master:
             backend    = "gloo",
             init_method = f"tcp://{MASTER_IP}:{MASTER_PORT}",
             world_size = world_size,
-            rank       = 0
+            rank       = 0,
+            timeout    = timedelta(seconds=30)
         )
 
         print("[Master] Network ready ✅")
