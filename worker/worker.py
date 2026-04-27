@@ -66,16 +66,8 @@ class Worker:
         import os
         import socket
 
-        os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
+        # On Windows, Gloo has limited interface support; let it auto-detect
         os.environ["USE_LIBUV"]          = "0"
-        # Disable Gloo's internal hostname resolution — use IP addresses only
-        os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
-        os.environ["GLOO_DEVICE_TRANSPORT"] = "TCP"
-
-    # Force gloo C++ to bind to configured interface
-    # (must match the adapter name on each machine)
-        os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
-        os.environ["TP_SOCKET_IFNAME"]   = GLOO_SOCKET_IFNAME
 
         print(f"[Worker {self.rank}] Connecting to master...")
         print(f"  Hostname   : {socket.gethostname()}")

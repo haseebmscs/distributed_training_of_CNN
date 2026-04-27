@@ -67,11 +67,8 @@ class Master:
     def setup_network(self, world_size):
         import socket
 
-        os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
+        # On Windows, Gloo has limited interface support; let it auto-detect
         os.environ["USE_LIBUV"]          = "0"
-        # Disable Gloo's internal hostname resolution — use IP addresses only
-        os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
-        os.environ["GLOO_DEVICE_TRANSPORT"] = "TCP"
 
         print(f"[Master] Setting up network...")
         print(f"  Hostname   : {socket.gethostname()}")
