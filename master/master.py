@@ -69,6 +69,9 @@ class Master:
 
         os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
         os.environ["USE_LIBUV"]          = "0"
+        # Disable Gloo's internal hostname resolution — use IP addresses only
+        os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
+        os.environ["GLOO_DEVICE_TRANSPORT"] = "TCP"
 
         print(f"[Master] Setting up network...")
         print(f"  Hostname   : {socket.gethostname()}")
@@ -225,9 +228,10 @@ class Master:
         expected_workers = max(world_size - 1, 0)
 
         # ── Step 1: Start bootstrap server ────────────────
+        # Bind to specific MASTER_IP, not 0.0.0.0, to avoid hostname resolution
         self.bootstrap = MasterBootstrapServer(
             expected_workers  = expected_workers,
-            host             = "0.0.0.0",
+            host             = MASTER_IP,
             port             = MASTER_BOOTSTRAP_PORT,
             on_worker_assigned = self._on_worker_assigned,
             timeout          = 120
