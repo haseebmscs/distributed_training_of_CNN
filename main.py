@@ -7,12 +7,10 @@ import traceback
 # Set env vars before torch import
 from config import (
     MASTER_IP, MASTER_PORT, MASTER_BOOTSTRAP_PORT,
-    GLOO_SOCKET_IFNAME
 )
 
 os.environ["MASTER_ADDR"]        = MASTER_IP
 os.environ["MASTER_PORT"]        = str(MASTER_PORT)
-os.environ["GLOO_SOCKET_IFNAME"] = GLOO_SOCKET_IFNAME
 os.environ["USE_LIBUV"]          = "0"
 
 import torch
