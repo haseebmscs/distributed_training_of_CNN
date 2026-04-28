@@ -14,7 +14,6 @@ os.environ["MASTER_PORT"]        = str(MASTER_PORT)
 os.environ["USE_LIBUV"]          = "0"
 
 import torch
-import torch.distributed as dist
 
 
 def _get_local_ip_candidates():

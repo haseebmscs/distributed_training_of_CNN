@@ -1,19 +1,19 @@
 import torch
 import torch.nn as nn
 import torch.optim as optim
-import torch.distributed as dist
 import socket
 import traceback
-from datetime import timedelta
 
 from config import (
     MASTER_IP, MASTER_PORT,
-    EPOCHS, LEARNING_RATE, HEARTBEAT_ENABLED,
-    GLOO_SOCKET_IFNAME, USE_LIBUV
+    EPOCHS, LEARNING_RATE, HEARTBEAT_ENABLED
+)
+from comm.distributed_socket import (
+    init_process_group, get_rank, get_world_size,
+    barrier, destroy_process_group, recv_tensor, send_tensor
 )
 from models.pipeline_model import split_model, PipelineStage
 from comm.comm_utils import (
-    send_tensor, recv_tensor,
     send_signal, recv_signal,
     send_metrics
 )
@@ -63,28 +63,22 @@ class Worker:
         print(f"[Worker {rank}] Initialised")
     
     def setup_network(self):
-        import socket
-
-        # Ignore any shell-provided interface binding on Windows.
-        os.environ.pop("GLOO_SOCKET_IFNAME", None)
-        os.environ["USE_LIBUV"] = "0"
-
-        print(f"[Worker {self.rank}] Connecting to master...")
-        print(f"  Hostname   : {socket.gethostname()}")
-        print(f"  MASTER_IP  : {MASTER_IP}")
-        print(f"  PORT       : {MASTER_PORT}")
+        """Setup distributed communication using sockets (no Gloo)."""
+        print(f"[Worker {self.rank}] Connecting to master via sockets...")
+        print(f"  Master IP  : {MASTER_IP}")
+        print(f"  Port       : {MASTER_PORT}")
         print(f"  Rank       : {self.rank}")
         print(f"  World size : {self.world_size}")
 
-        dist.init_process_group(
-            backend    = "gloo",
-            init_method = f"tcp://{MASTER_IP}:{MASTER_PORT}",
-            world_size = self.world_size,
-            rank       = self.rank,
-            timeout    = timedelta(seconds=30)
+        # Initialize socket-based process group (rank 1+ = workers)
+        init_process_group(
+            backend="socket",
+            world_size=self.world_size,
+            rank=self.rank,
+            timeout=60
         )
 
-        print(f"[Worker {self.rank}] Connected ✅")
+        print(f"[Worker {self.rank}] Socket connection established ✅")
 
     def _run_with_error_reporting(self, step_name, callback):
         try:
@@ -103,8 +97,7 @@ class Worker:
             self.stage_idx    → which stage this worker runs
             self.total_stages → total pipeline stages
         """
-        assignment = torch.zeros(2, dtype=torch.long)
-        dist.recv(assignment, src=0)
+        assignment = recv_tensor(src=0)
 
         self.stage_idx    = assignment[0].item()
         self.total_stages = assignment[1].item()
@@ -400,7 +393,7 @@ class Worker:
             # ── Step 8: Cleanup ────────────────────────────────
             print(f"[Worker {self.rank}] Cleaning up...")
             try:
-                dist.destroy_process_group()
+                destroy_process_group()
             except Exception:
                 print(f"[Worker {self.rank}] Process group cleanup failed:")
                 print(traceback.format_exc())

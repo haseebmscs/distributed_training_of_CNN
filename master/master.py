@@ -1,5 +1,4 @@
 import torch
-import torch.distributed as dist
 import torch.optim as optim
 import time
 import os
@@ -13,6 +12,10 @@ from config import (
     EPOCHS, BATCH_SIZE, LEARNING_RATE, MIN_WORKERS,
     HEARTBEAT_ENABLED, GLOO_SOCKET_IFNAME, USE_LIBUV
 )
+from comm.distributed_socket import (
+    init_process_group, get_rank, get_world_size,
+    barrier, destroy_process_group, send_tensor
+)
 from master.registry   import WorkerRegistry
 from master.scheduler  import Scheduler
 from utils.logger      import TrainingLogger
@@ -20,7 +23,7 @@ from comm.heartbeat    import HeartbeatMonitor
 from comm.bootstrap    import MasterBootstrapServer
 from comm.comm_utils   import (
     send_signal, recv_signal,
-    send_tensor, recv_metrics
+    recv_metrics
 )
 from comm.signals      import (
     SIGNAL_START, SIGNAL_STOP,
@@ -65,27 +68,21 @@ class Master:
             )
     
     def setup_network(self, world_size):
-        import socket
-
-        # Ignore any shell-provided interface binding on Windows.
-        os.environ.pop("GLOO_SOCKET_IFNAME", None)
-        os.environ["USE_LIBUV"] = "0"
-
-        print(f"[Master] Setting up network...")
-        print(f"  Hostname   : {socket.gethostname()}")
-        print(f"  MASTER_IP  : {MASTER_IP}")
-        print(f"  PORT       : {MASTER_PORT}")
+        """Setup distributed communication using sockets (no Gloo)."""
+        print(f"[Master] Setting up socket-based distributed communication...")
+        print(f"  Master IP  : {MASTER_IP}")
+        print(f"  Port       : {MASTER_PORT}")
         print(f"  World size : {world_size}")
 
-        dist.init_process_group(
-            backend    = "gloo",
-            init_method = f"tcp://{MASTER_IP}:{MASTER_PORT}",
-            world_size = world_size,
-            rank       = 0,
-            timeout    = timedelta(seconds=30)
+        # Initialize socket-based process group (rank 0 = master)
+        init_process_group(
+            backend="socket",
+            world_size=world_size,
+            rank=0,
+            timeout=60
         )
 
-        print("[Master] Network ready ✅")
+        print("[Master] Socket network ready ✅")
 
     def wait_for_workers(self):
         if self.bootstrap:
@@ -309,6 +306,6 @@ class Master:
         self.logger.print_summary()
 
         print("[Master] Shutting down ✅")
-        dist.destroy_process_group()
+        destroy_process_group()
 
     

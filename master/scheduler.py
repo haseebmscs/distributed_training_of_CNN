@@ -1,9 +1,9 @@
 import torch
-import torch.distributed as dist
 from config import MAX_ACTIVE, MIN_WORKERS
 from models.pipeline_model import split_model
 from comm.signals import SIGNAL_STANDBY, SIGNAL_PROMOTE, SIGNAL_ASSIGN
 from comm.comm_utils import send_signal
+from comm.distributed_socket import send_tensor
 
 class Scheduler:
     """
@@ -113,7 +113,7 @@ class Scheduler:
             [stage_idx, total_stages],
             dtype=torch.long
         )
-        dist.send(assignment, dst=rank)
+        send_tensor(assignment, dst=rank)
         print(f"[Scheduler] Sent Stage {stage_idx+1} "
               f"assignment → rank {rank}")
 
