@@ -38,7 +38,7 @@ MAX_ACTIVE   = _env_int("MAX_ACTIVE", 5)
 MIN_WORKERS  = _env_int("MIN_WORKERS", 1)
 
 # ── Training Settings ─────────────────────────
-EPOCHS            = _env_int("EPOCHS", 10)
+EPOCHS            = _env_int("EPOCHS", 1)
 BATCH_SIZE        = _env_int("BATCH_SIZE", 64)
 LEARNING_RATE     = _env_float("LEARNING_RATE", 0.01)
 DATA_LOADER_WORKERS = _env_int("DATA_LOADER_WORKERS", 0)

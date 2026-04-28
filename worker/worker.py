@@ -78,7 +78,7 @@ class Worker:
             timeout=60
         )
 
-        print(f"[Worker {self.rank}] Socket connection established ✅")
+        print(f"[Worker {self.rank}] Socket connection established ")
 
     def _run_with_error_reporting(self, step_name, callback):
         try:
@@ -138,7 +138,7 @@ class Worker:
             print(f"[Worker {self.rank}] Starting fresh")
 
         print(f"[Worker {self.rank}] Stage "
-              f"{self.stage_idx + 1} built ✅")
+              f"{self.stage_idx + 1} built ")
 
     def forward_pass(self):
         """
@@ -158,29 +158,37 @@ class Worker:
         is_first = (self.stage_idx == 0)
         is_last  = (self.stage_idx == self.total_stages - 1)
 
+        print(f"\n[Worker {self.rank}] ═══ FORWARD PASS ═══")
+        print(f"  Stage: {self.stage_idx + 1}/{self.total_stages}")
+
         # ── Receive input ──────────────────────────────────
         if is_first:
             # First worker receives from Master (rank 0)
             received = recv_tensor(src=0)
+            print(f"   Received from Master (rank 0): {list(received.shape)}")
         else:
             # Other workers receive from previous worker
             prev_rank = self.rank - 1
             received  = recv_tensor(src=prev_rank)
+            print(f"   Received from Rank {prev_rank}: {list(received.shape)}")
 
         # Track received tensor for backward pass
         received.requires_grad_(True)
         self.last_input = received
 
         # ── Forward through this stage ─────────────────────
+        print(f"    Processing through Stage {self.stage_idx + 1}...")
         self.stage.train()
         output = self.stage(received)
         self.last_output = output
+        print(f"   Output shape: {list(output.shape)}")
 
         # ── Send output or compute loss ────────────────────
         if is_last:
             # Receive labels from Master
             labels_float = recv_tensor(src=0)
             labels       = labels_float.long()
+            print(f"   Received labels from Master: {list(labels.shape)}")
 
             # Compute loss
             criterion = nn.CrossEntropyLoss()
@@ -191,8 +199,12 @@ class Worker:
             correct      = (predicted == labels).sum().item()
             accuracy     = 100.0 * correct / labels.size(0)
 
+            print(f"   Loss: {loss.item():.4f}")
+            print(f"   Accuracy: {accuracy:.2f}%")
+
             # Send metrics to Master
             send_metrics(loss.item(), accuracy, dst=0)
+            print(f"   Sent metrics to Master (rank 0)")
 
             return output, loss
 
@@ -200,6 +212,7 @@ class Worker:
             # Send output to next worker
             next_rank = self.rank + 1
             send_tensor(output.detach(), dst=next_rank)
+            print(f"   Sent to Rank {next_rank}: {list(output.detach().shape)}")
 
             return output, None
 
@@ -225,37 +238,50 @@ class Worker:
         is_first = (self.stage_idx == 0)
         is_last  = (self.stage_idx == self.total_stages - 1)
 
+        print(f"\n[Worker {self.rank}] ═══ BACKWARD PASS ═══")
+        print(f"  Stage: {self.stage_idx + 1}/{self.total_stages}")
+
         # Zero gradients before backward
         self.optimizer.zero_grad()
 
         if is_last:
             # Start backward pass from loss
+            print(f"  🔄 Starting backward from loss: {loss.item():.4f}")
             loss.backward()
+            print(f"   Backward pass computed")
 
             # Send gradient to previous worker
             if not is_first:
                 grad = self.last_input.grad
                 if grad is not None:
                     prev_rank = self.rank - 1
+                    print(f"   Sending gradient to Rank {prev_rank}: {list(grad.shape)}")
                     send_tensor(grad, dst=prev_rank)
 
         else:
             # Receive gradient from next worker
             next_rank     = self.rank + 1
+            print(f"   Waiting for gradient from Rank {next_rank}...")
             received_grad = recv_tensor(src=next_rank)
+            print(f"   Received gradient: {list(received_grad.shape)}")
 
             # Continue backward pass
+            print(f"  🔄 Computing backward pass with received gradient...")
             self.last_output.backward(received_grad)
+            print(f"   Backward pass computed")
 
             # Send gradient further back
             if not is_first:
                 grad = self.last_input.grad
                 if grad is not None:
                     prev_rank = self.rank - 1
+                    print(f"   Sending gradient to Rank {prev_rank}: {list(grad.shape)}")
                     send_tensor(grad, dst=prev_rank)
 
         # Update this stage's weights
+        print(f"  🔧 Updating stage weights via optimizer...")
         self.optimizer.step()
+        print(f"   Weights updated")
 
     def run_active(self):
         """
@@ -397,4 +423,4 @@ class Worker:
             except Exception:
                 print(f"[Worker {self.rank}] Process group cleanup failed:")
                 print(traceback.format_exc())
-            print(f"[Worker {self.rank}] Done ✅")
+            print(f"[Worker {self.rank}] Done ")
