@@ -63,34 +63,10 @@ class Worker:
         print(f"[Worker {rank}] Initialised")
     
     def setup_network(self):
-        import os
         import socket
-        import subprocess
 
-        # On Windows, Gloo needs the correct interface name
-        # Find the interface that has MASTER_IP
-        try:
-            result = subprocess.run(
-                ['ipconfig'],
-                capture_output=True,
-                text=True
-            )
-            output = result.stdout
-            
-            # Look for the interface with MASTER_IP or use the one with internet access
-            lines = output.split('\n')
-            current_adapter = None
-            for line in lines:
-                if 'adapter' in line.lower() and ':' in line:
-                    current_adapter = line.split(':')[0].strip()
-                if '192.168' in line and current_adapter:  # Look for LAN adapters
-                    print(f"[Worker {self.rank}] Found LAN adapter: {current_adapter}")
-                    if "Wi-Fi" in current_adapter or "Ethernet" in current_adapter:
-                        os.environ["GLOO_SOCKET_IFNAME"] = current_adapter
-                    break
-        except Exception as e:
-            print(f"[Worker {self.rank}] Warning: Could not auto-detect interface: {e}")
-
+        # Ignore any shell-provided interface binding on Windows.
+        os.environ.pop("GLOO_SOCKET_IFNAME", None)
         os.environ["USE_LIBUV"] = "0"
 
         print(f"[Worker {self.rank}] Connecting to master...")
