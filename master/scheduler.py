@@ -1,9 +1,12 @@
+import json
+
 import torch
+
 from config import MAX_ACTIVE, MIN_WORKERS
 from models.pipeline_model import split_model
 from comm.signals import SIGNAL_STANDBY, SIGNAL_PROMOTE, SIGNAL_ASSIGN
 from comm.comm_utils import send_signal
-from comm.distributed_socket import send_tensor
+from comm import distributed_socket as dist_socket
 
 class Scheduler:
     """
@@ -79,7 +82,12 @@ class Scheduler:
             self.stage_map[rank] = stage_idx
 
             # Send stage config to worker
-            self._send_stage_assignment(rank, stage_idx, num_active)
+            self._send_stage_assignment(
+                rank,
+                stage_idx,
+                num_active,
+                active_order=active_ranks,
+            )
 
         # Tell standby workers to wait
         for rank in standby_ranks:
@@ -89,14 +97,14 @@ class Scheduler:
         return self.stages
 
     def _send_stage_assignment(self, rank, stage_idx, total_stages,
-                               send_assign_signal=True):
+                               send_assign_signal=True, active_order=None):
         """
         Sends stage assignment info to a worker.
         Worker needs to know:
             - Which stage index it has (0-based)
             - Total number of stages
-            - Who to send data to (next rank)
-            - Who to receive data from (prev rank)
+            - Who to send data to (next rank) - with P2P address
+            - Who to receive data from (prev rank) - with P2P address
 
         Args:
             rank         (int): worker rank
@@ -113,9 +121,55 @@ class Scheduler:
             [stage_idx, total_stages],
             dtype=torch.long
         )
-        send_tensor(assignment, dst=rank)
+        dist_socket.send_tensor(assignment, dst=rank)
         print(f"[Scheduler] Sent Stage {stage_idx+1} "
-              f"assignment → rank {rank}")
+              f"assignment -> rank {rank}")
+
+        # Now send P2P neighbor info as separate message
+        # Get active ranks in pipeline order
+        if active_order is None:
+            active_order = self.get_pipeline_order()
+        
+        # Determine prev/next ranks
+        prev_rank = None
+        next_rank = None
+        
+        if rank in active_order:
+            idx = active_order.index(rank)
+            if idx > 0:
+                prev_rank = active_order[idx - 1]
+            if idx < len(active_order) - 1:
+                next_rank = active_order[idx + 1]
+        
+        # Build P2P neighbor info
+        p2p_info = {
+            "prev_rank": prev_rank,
+            "next_rank": next_rank,
+            "neighbors": {}
+        }
+        
+        # Get P2P address for each neighbor
+        if prev_rank:
+            worker_info = dist_socket._default_group.get_worker_info(prev_rank)
+            p2p_info["neighbors"][prev_rank] = {
+                "ip": worker_info.get("ip"),
+                "p2p_port": worker_info.get("p2p_port")
+            }
+        
+        if next_rank:
+            worker_info = dist_socket._default_group.get_worker_info(next_rank)
+            p2p_info["neighbors"][next_rank] = {
+                "ip": worker_info.get("ip"),
+                "p2p_port": worker_info.get("p2p_port")
+            }
+        
+        # Serialize and send as tensor
+        p2p_payload = json.dumps(p2p_info).encode("utf-8")
+        p2p_tensor = torch.tensor(list(p2p_payload), dtype=torch.uint8)
+        dist_socket.send_tensor(p2p_tensor, dst=rank)
+        
+        print(f"[Scheduler] Sent P2P info -> rank {rank}:")
+        print(f"  Prev: {prev_rank}, Next: {next_rank}")
 
     # ── PIPELINE ORDER ────────────────────────────────────
 

@@ -40,6 +40,11 @@ class CIFAR10Dataset(Dataset):
         self.transform = transform
         self.samples   = []
 
+        if not os.path.isdir(root_dir):
+            raise FileNotFoundError(
+                f"Dataset folder not found: {root_dir}"
+            )
+
         # Get sorted class names
         self.classes = sorted(os.listdir(root_dir))
 
@@ -70,6 +75,21 @@ class CIFAR10Dataset(Dataset):
 def get_dataloaders():
     train_dir = os.path.join(DATA_ROOT, "train")
     test_dir  = os.path.join(DATA_ROOT, "test")
+
+    if not os.path.isdir(train_dir) and not os.path.isdir(test_dir):
+        _download_and_organise()
+
+    if not os.path.isdir(train_dir):
+        raise FileNotFoundError(
+            f"Training dataset folder not found: {train_dir}"
+        )
+
+    if not os.path.isdir(test_dir):
+        print(
+            f"[Dataset] Warning: test split missing at {test_dir}; "
+            f"using train split as fallback"
+        )
+        test_dir = train_dir
 
     train_dataset = CIFAR10Dataset(train_dir, TRAIN_TRANSFORM)
     test_dataset  = CIFAR10Dataset(test_dir,  TEST_TRANSFORM)

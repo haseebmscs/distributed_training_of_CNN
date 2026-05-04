@@ -27,6 +27,7 @@ def _env_bool(name, default):
 MASTER_IP   = _env("MASTER_IP", "10.236.188.44")   # Master's WiFi IP
 MASTER_BOOTSTRAP_PORT = _env_int("MASTER_BOOTSTRAP_PORT", 29600)
 MASTER_PORT = _env_int("MASTER_PORT", 29601)
+WORKER_P2P_BASE_PORT  = _env_int("WORKER_P2P_BASE_PORT", 30000)  # P2P data transfers
 WORKER_IP   = _env("WORKER_IP", "10.236.188.11")   # Worker's WiFi IP
 
 GLOO_SOCKET_IFNAME = _env("GLOO_SOCKET_IFNAME", "Wi-Fi")
@@ -39,7 +40,7 @@ MIN_WORKERS  = _env_int("MIN_WORKERS", 1)
 
 # ── Training Settings ─────────────────────────
 EPOCHS            = _env_int("EPOCHS", 1)
-BATCH_SIZE        = _env_int("BATCH_SIZE", 64)
+BATCH_SIZE        = _env_int("BATCH_SIZE", 128)
 LEARNING_RATE     = _env_float("LEARNING_RATE", 0.01)
 DATA_LOADER_WORKERS = _env_int("DATA_LOADER_WORKERS", 0)
 

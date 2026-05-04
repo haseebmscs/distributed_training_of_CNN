@@ -47,6 +47,7 @@ class DistributedSocketGroup:
         self.is_master = (rank == 0)
         self.initialized = False
         self.peer_sockets = {}  # rank -> socket
+        self.worker_info = {}  # rank -> {"ip": ip, "p2p_port": port, ...}
         self.server_socket = None
         self.server_thread = None
         self._lock = threading.Lock()
@@ -138,11 +139,17 @@ class DistributedSocketGroup:
                         print(f"[DistSocket] Duplicate rank {worker_rank}")
                         continue
                     
-                    # Store socket
+                    # Store socket and worker address info
                     with self._lock:
                         self.peer_sockets[worker_rank] = conn
+                        self.worker_info[worker_rank] = {
+                            "ip": worker_info.get("local_ip", addr[0]),
+                            "p2p_port": worker_info.get("p2p_port"),
+                            "hostname": worker_info.get("hostname", "unknown")
+                        }
                     
                     print(f"[DistSocket] Accepted rank {worker_rank} from {addr}")
+                    print(f"  Worker P2P: {worker_info.get('local_ip', addr[0])}:{worker_info.get('p2p_port')}")
                     
                     # Send acknowledgment
                     ack = {"status": "ok", "rank": worker_rank, "world_size": self.world_size}
@@ -164,20 +171,42 @@ class DistributedSocketGroup:
 
     def _init_worker(self):
         """Worker: connect to master."""
+        import socket as socket_module
+        
         print(f"[DistSocket] Worker rank {self.rank} connecting to {self.master_ip}:{self.master_port}")
+        
+        # Get local IP (the IP that connects to master)
+        local_ip = None
+        try:
+            s = socket_module.socket(socket_module.AF_INET, socket_module.SOCK_DGRAM)
+            s.connect((self.master_ip, self.master_port))
+            local_ip = s.getsockname()[0]
+            s.close()
+        except:
+            local_ip = "127.0.0.1"
+        
+        # P2P port for this worker (30000 + rank)
+        from config import WORKER_P2P_BASE_PORT
+        p2p_port = WORKER_P2P_BASE_PORT + self.rank
         
         start_time = time.time()
         last_error = None
         
         while time.time() - start_time < self.timeout:
             try:
-                conn = socket.create_connection(
+                conn = socket_module.create_connection(
                     (self.master_ip, self.master_port),
                     timeout=5
                 )
                 
-                # Send rank info
-                info = {"rank": self.rank, "world_size": self.world_size}
+                # Send rank info + P2P address info
+                info = {
+                    "rank": self.rank,
+                    "world_size": self.world_size,
+                    "local_ip": local_ip,
+                    "p2p_port": p2p_port,
+                    "hostname": socket_module.gethostname()
+                }
                 self._send_json(conn, info)
                 
                 # Receive acknowledgment
@@ -287,6 +316,19 @@ class DistributedSocketGroup:
     def get_world_size(self):
         """Return total number of processes."""
         return self.world_size
+
+    def get_worker_info(self, rank):
+        """
+        Get P2P address info for a worker rank.
+        Only available on master after initialization.
+        
+        Returns:
+            dict: {"ip": ip, "p2p_port": port, "hostname": hostname}
+        """
+        if not self.is_master:
+            raise RuntimeError("get_worker_info only available on master")
+        
+        return self.worker_info.get(rank, {})
 
     def is_available(self):
         """Check if this backend is available."""
