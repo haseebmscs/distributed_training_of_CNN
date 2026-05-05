@@ -37,16 +37,16 @@ class TrainingLogger:
             "timestamp" : []
         }
 
-        # Training start time
-        self.start_time  = time.time()
-        self.epoch_start = time.time()
+        # Training start time is set explicitly once workers are ready.
+        self.start_time  = None
+        self.epoch_start = None
 
         # Write CSV header
         self._write_csv_header()
 
         print(f"[Logger] Logging to:")
-        print(f"  CSV    → {self.csv_path}")
-        print(f"  Events → {self.events_path}")
+        print(f"  CSV    -> {self.csv_path}")
+        print(f"  Events -> {self.events_path}")
 
     # ── CSV SETUP ─────────────────────────────────────────
 
@@ -74,7 +74,7 @@ class TrainingLogger:
             loss          (float): batch loss value
             accuracy      (float): batch accuracy (%)
         """
-        elapsed = time.time() - self.start_time
+        elapsed = time.time() - self.start_time if self.start_time is not None else 0.0
 
         # Print to terminal
         print(f"[Epoch {epoch}] "
@@ -112,8 +112,8 @@ class TrainingLogger:
             avg_loss     (float): average loss for this epoch
             avg_accuracy (float): average accuracy for epoch
         """
-        epoch_time = time.time() - self.epoch_start
-        total_time = time.time() - self.start_time
+        epoch_time = time.time() - self.epoch_start if self.epoch_start is not None else 0.0
+        total_time = time.time() - self.start_time if self.start_time is not None else 0.0
 
         print(f"\n{'='*55}")
         print(f"  Epoch {epoch}/{total_epochs} Complete")
@@ -132,6 +132,12 @@ class TrainingLogger:
 
         # Reset epoch timer
         self.epoch_start = time.time()
+
+    def start_timing(self):
+        """Start or reset training timers from the current moment."""
+        now = time.time()
+        self.start_time = now
+        self.epoch_start = now
 
     def log_event(self, message):
         """

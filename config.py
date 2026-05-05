@@ -32,6 +32,8 @@ WORKER_IP   = _env("WORKER_IP", "10.236.188.11")   # Worker's WiFi IP
 
 GLOO_SOCKET_IFNAME = _env("GLOO_SOCKET_IFNAME", "Wi-Fi")
 USE_LIBUV          = _env_bool("USE_LIBUV", False)
+SOCKET_TIMEOUT     = _env_int("SOCKET_TIMEOUT", 180)
+HEARTBEAT_PORT     = _env_int("HEARTBEAT_PORT", MASTER_PORT + 10)
 
 # ── Worker Limits ─────────────────────────────
 MAX_WORKERS  = _env_int("MAX_WORKERS", 50)
@@ -39,7 +41,7 @@ MAX_ACTIVE   = _env_int("MAX_ACTIVE", 5)
 MIN_WORKERS  = _env_int("MIN_WORKERS", 1)
 
 # ── Training Settings ─────────────────────────
-EPOCHS            = _env_int("EPOCHS", 1)
+EPOCHS            = _env_int("EPOCHS", 5)
 BATCH_SIZE        = _env_int("BATCH_SIZE", 128)
 LEARNING_RATE     = _env_float("LEARNING_RATE", 0.01)
 DATA_LOADER_WORKERS = _env_int("DATA_LOADER_WORKERS", 0)
@@ -47,7 +49,7 @@ DATA_LOADER_WORKERS = _env_int("DATA_LOADER_WORKERS", 0)
 # ── Heartbeat Settings ────────────────────────
 HEARTBEAT_INTERVAL = _env_int("HEARTBEAT_INTERVAL", 5)
 HEARTBEAT_TIMEOUT  = _env_int("HEARTBEAT_TIMEOUT", 15)
-HEARTBEAT_ENABLED  = _env_bool("HEARTBEAT_ENABLED", False)
+HEARTBEAT_ENABLED  = _env_bool("HEARTBEAT_ENABLED", True)
 
 # ── Checkpoint Settings ───────────────────────
 CHECKPOINT_EVERY = _env_int("CHECKPOINT_EVERY", 2)

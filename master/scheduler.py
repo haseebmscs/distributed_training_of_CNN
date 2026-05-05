@@ -275,6 +275,7 @@ class Scheduler:
 
         print(f"[Scheduler] Promoting rank {replacement} "
               f"→ Stage {dead_stage_num}")
+        print(f"[Scheduler] Stage map before promotion: {self.stage_map}")
 
         # Update registry
         self.registry.set_active(replacement, dead_stage_num)
@@ -288,12 +289,14 @@ class Scheduler:
             self.num_stages,
             send_assign_signal=False
         )
-
         print(f"[Scheduler] ✅ Rank {replacement} "
               f"now handling Stage {dead_stage_num}")
 
         # Print updated pipeline
         print(f"[Scheduler] New pipeline order: "
               f"{self.get_pipeline_order()}")
+
+        # Return the replacement rank so caller can wait for readiness
+        return replacement
 
 

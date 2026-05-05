@@ -7,7 +7,8 @@ import json
 
 from config import (
     MASTER_IP, MASTER_PORT,
-    EPOCHS, LEARNING_RATE, HEARTBEAT_ENABLED
+    EPOCHS, LEARNING_RATE, HEARTBEAT_ENABLED,
+    SOCKET_TIMEOUT
 )
 from comm.distributed_socket import (
     init_process_group, get_rank, get_world_size,
@@ -23,7 +24,7 @@ from comm.signals import (
     SIGNAL_START, SIGNAL_STOP,
     SIGNAL_NEXT,  SIGNAL_HELLO,
     SIGNAL_STANDBY, SIGNAL_PROMOTE,
-    SIGNAL_DONE, SIGNAL_ASSIGN
+    SIGNAL_DONE, SIGNAL_ASSIGN, SIGNAL_READY
 )
 from comm.heartbeat    import HeartbeatSender
 from utils.checkpoint  import (
@@ -83,7 +84,7 @@ class Worker:
             backend="socket",
             world_size=self.world_size,
             rank=self.rank,
-            timeout=60
+            timeout=SOCKET_TIMEOUT
         )
 
         print(f"[Worker {self.rank}] Socket connection established ")
@@ -150,9 +151,16 @@ class Worker:
             momentum=0.9
         )
 
-        # In distributed training, start fresh each run
-        # (checkpoint compatibility changes with pipeline reconfig)
-        print(f"[Worker {self.rank}] Starting fresh")
+        # Attempt to load latest checkpoint for this stage so promoted
+        # standbys can continue from the most recent epoch.
+        latest_epoch = find_latest_checkpoint(self.stage_idx)
+        if latest_epoch > 0:
+            loaded = load_checkpoint(self.stage, self.stage_idx, self.optimizer, latest_epoch)
+            self.loaded_epoch = loaded
+            print(f"[Worker {self.rank}] Restored from checkpoint epoch {loaded}")
+        else:
+            self.loaded_epoch = 0
+            print(f"[Worker {self.rank}] Starting fresh")
 
         print(f"[Worker {self.rank}] Stage "
               f"{self.stage_idx + 1} built ")
@@ -165,27 +173,45 @@ class Worker:
         Establishes P2P client connections to prev/next workers.
         """
         from config import WORKER_P2P_BASE_PORT
+        import time
         
         # Start P2P server (listen for tensors from neighbors)
         p2p_port = WORKER_P2P_BASE_PORT + self.rank
         self.p2p_server = P2PDataServer(self.rank, port=p2p_port)
         self.p2p_server.start()
         
+        # Give server time to bind to port
+        time.sleep(0.5)
+        print(f"[Worker {self.rank}] P2P server listening on port {p2p_port}")
+        
         # Create P2P client (for sending tensors to neighbors)
         self.p2p_client = P2PDataClient(self.rank)
         
-        # Connect to neighbors
-        import time
+        # Connect to neighbors with retries
         if self.next_rank is not None:
             neighbor_info = self.p2p_neighbors.get(self.next_rank, {})
             if neighbor_info:
                 next_ip = neighbor_info.get("ip")
                 next_port = neighbor_info.get("p2p_port")
                 if next_ip and next_port:
-                    try:
-                        self.p2p_client.connect(self.next_rank, next_ip, next_port)
-                    except Exception as e:
-                        print(f"[Worker {self.rank}] Warning: Could not connect to next rank {self.next_rank}: {e}")
+                    for attempt in range(5):
+                        try:
+                            print(f"[Worker {self.rank}] Connecting to next rank {self.next_rank} at {next_ip}:{next_port} (attempt {attempt+1}/5)")
+                            self.p2p_client.connect(self.next_rank, next_ip, next_port)
+                            print(f"[Worker {self.rank}] ✓ Connected to next rank {self.next_rank}")
+                            break
+                        except Exception as e:
+                            if attempt < 4:
+                                print(f"[Worker {self.rank}] Attempt {attempt+1} failed: {e}, retrying in 0.5s...")
+                                time.sleep(0.5)
+                            else:
+                                print(f"[Worker {self.rank}] ERROR: Could not connect to next rank {self.next_rank} after 5 attempts: {e}")
+                else:
+                    print(f"[Worker {self.rank}] WARNING: Missing IP/port for next rank {self.next_rank}")
+            else:
+                print(f"[Worker {self.rank}] INFO: No neighbor info for next rank {self.next_rank}")
+        else:
+            print(f"[Worker {self.rank}] INFO: No next rank (last stage)")
         
         if self.prev_rank is not None:
             neighbor_info = self.p2p_neighbors.get(self.prev_rank, {})
@@ -193,10 +219,24 @@ class Worker:
                 prev_ip = neighbor_info.get("ip")
                 prev_port = neighbor_info.get("p2p_port")
                 if prev_ip and prev_port:
-                    try:
-                        self.p2p_client.connect(self.prev_rank, prev_ip, prev_port)
-                    except Exception as e:
-                        print(f"[Worker {self.rank}] Warning: Could not connect to prev rank {self.prev_rank}: {e}")
+                    for attempt in range(5):
+                        try:
+                            print(f"[Worker {self.rank}] Connecting to prev rank {self.prev_rank} at {prev_ip}:{prev_port} (attempt {attempt+1}/5)")
+                            self.p2p_client.connect(self.prev_rank, prev_ip, prev_port)
+                            print(f"[Worker {self.rank}] ✓ Connected to prev rank {self.prev_rank}")
+                            break
+                        except Exception as e:
+                            if attempt < 4:
+                                print(f"[Worker {self.rank}] Attempt {attempt+1} failed: {e}, retrying in 0.5s...")
+                                time.sleep(0.5)
+                            else:
+                                print(f"[Worker {self.rank}] ERROR: Could not connect to prev rank {self.prev_rank} after 5 attempts: {e}")
+                else:
+                    print(f"[Worker {self.rank}] WARNING: Missing IP/port for prev rank {self.prev_rank}")
+            else:
+                print(f"[Worker {self.rank}] INFO: No neighbor info for prev rank {self.prev_rank}")
+        else:
+            print(f"[Worker {self.rank}] INFO: No prev rank (first stage)")
         
         print(f"[Worker {self.rank}] P2P setup complete")
 
@@ -357,7 +397,8 @@ class Worker:
         print(f"[Worker {self.rank}] Starting "
               f"active training loop...")
 
-        epoch = 1
+        # Initialize epoch counter from loaded checkpoint if available
+        epoch = getattr(self, "loaded_epoch", 0) or 1
 
         while True:
             # Wait for signal from Master
@@ -426,6 +467,17 @@ class Worker:
                 # Setup P2P connections to neighbors
                 self.setup_p2p()
 
+                # Start heartbeat now that this standby is active.
+                if HEARTBEAT_ENABLED and self.heartbeat is None:
+                    self.heartbeat = HeartbeatSender(self.rank)
+                    self.heartbeat.start()
+                # Notify Master we're ready after promotion/setup
+                try:
+                    send_signal(SIGNAL_READY, dst=0)
+                    print(f"[Worker {self.rank}] Sent READY to Master (promoted)")
+                except Exception:
+                    print(f"[Worker {self.rank}] Warning: could not send READY to Master (promoted)")
+
                 # Switch to active mode
                 self.is_active = True
                 self.run_active()
@@ -468,6 +520,13 @@ class Worker:
                 if HEARTBEAT_ENABLED:
                     self.heartbeat = HeartbeatSender(self.rank)
                     self.heartbeat.start()
+
+                # Notify Master we're ready to receive training batches
+                try:
+                    send_signal(SIGNAL_READY, dst=0)
+                    print(f"[Worker {self.rank}] Sent READY to Master")
+                except Exception:
+                    print(f"[Worker {self.rank}] Warning: could not send READY to Master")
 
                 # ── Step 7: Run training loop ──────────────────
                 self.run_active()

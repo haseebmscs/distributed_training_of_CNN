@@ -1,6 +1,7 @@
 import torch
 import torch.optim as optim
 import time
+import threading
 import os
 import socket
 import traceback
@@ -10,7 +11,8 @@ from config import (
     MASTER_IP, MASTER_PORT, MASTER_BOOTSTRAP_PORT,
     MAX_WORKERS,
     EPOCHS, BATCH_SIZE, LEARNING_RATE, MIN_WORKERS,
-    HEARTBEAT_ENABLED, GLOO_SOCKET_IFNAME, USE_LIBUV
+    HEARTBEAT_ENABLED, GLOO_SOCKET_IFNAME, USE_LIBUV,
+    SOCKET_TIMEOUT
 )
 from comm.distributed_socket import (
     init_process_group, get_rank, get_world_size,
@@ -29,6 +31,7 @@ from comm.signals      import (
     SIGNAL_START, SIGNAL_STOP,
     SIGNAL_NEXT
 )
+from comm.signals      import SIGNAL_READY
 from dataset.custom_dataset import get_dataloaders
 
 class Master:
@@ -50,13 +53,16 @@ class Master:
         self.monitor   = None   # built after workers join
         self.bootstrap = None
 
+        # Event used to pause/resume master sending during promotions
+        self.resume_event = threading.Event()
+        self.resume_event.set()
+
         # DataLoaders — only Master loads data
         self.train_loader = None
         self.test_loader  = None
 
         print("[Master] Initialised")
-        print(f"[Master] Waiting for minimum "
-              f"{MIN_WORKERS} workers...")
+        print("[Master] Waiting for workers to connect...")
 
     def _on_worker_assigned(self, rank, peer_info):
         if self.registry.register(rank):
@@ -66,6 +72,14 @@ class Master:
             self.logger.log_event(
                 f"Bootstrap worker rank {rank} joined from {hostname} ({local_ip})"
             )
+            # If this rank is beyond the initially expected active
+            # workers, note that it joined as a standby.
+            try:
+                if self.bootstrap and rank > self.bootstrap.expected_workers:
+                    print(f"[Master] Rank {rank} joined as STANDBY")
+                    self.logger.log_event(f"Rank {rank} joined as STANDBY")
+            except Exception:
+                pass
     
     def setup_network(self, world_size):
         """Setup distributed communication using sockets (no Gloo)."""
@@ -79,23 +93,43 @@ class Master:
             backend="socket",
             world_size=world_size,
             rank=0,
-            timeout=60
+            timeout=SOCKET_TIMEOUT
         )
 
         print("[Master] Socket network ready ✅")
 
-    def wait_for_workers(self):
+    def wait_for_workers(self, expected_workers):
+        """Wait until all expected workers are assigned by bootstrap."""
+        if expected_workers <= 0:
+            print("[Master] No workers expected (world_size=1).")
+            return 0
+
         if self.bootstrap:
-            print("[Master] Waiting for bootstrap workers to join...")
-            self.bootstrap.wait_until_complete(timeout=120)
+            print(
+                f"[Master] Waiting for all workers to join "
+                f"({expected_workers}/{expected_workers})..."
+            )
+            # Wait until the bootstrap server has assigned the expected
+            # number of worker ranks. The bootstrap server continues
+            # running afterwards so late joiners can register as standby.
+            assigned = self.bootstrap.wait_for_expected(timeout=120)
+            if not assigned:
+                raise TimeoutError(
+                    f"Timed out waiting for workers: "
+                    f"{self.registry.count_total()}/{expected_workers} joined"
+                )
+
+            bootstrap_error = self.bootstrap.get_error()
+            if bootstrap_error:
+                raise RuntimeError(f"Bootstrap failed:\n{bootstrap_error}")
 
         total = self.registry.count_total()
-        if total < MIN_WORKERS:
+        if total < expected_workers:
             raise RuntimeError(
-                f"Only {total} workers joined; need at least {MIN_WORKERS}"
+                f"Workers joined mismatch: expected {expected_workers}, got {total}"
             )
 
-        print(f"[Master] {total} workers ready!")
+        print(f"[Master] All workers ready: {total}/{expected_workers}")
         return total
 
     def handle_failure(self, dead_rank):
@@ -112,21 +146,53 @@ class Master:
         # Get dead worker's stage
         dead_stage = self.registry.get_stage(dead_rank)
 
-        # Ask scheduler to promote a standby
-        self.scheduler.handle_failure(dead_rank)
+        # Pause sending new batches while we reconfigure
+        print("[Master] Pausing master send loop until replacement is ready...")
+        self.resume_event.clear()
+
+        # Ask scheduler to promote a standby and get replacement rank
+        replacement = self.scheduler.handle_failure(dead_rank)
 
         # Log the promotion
-        new_rank = self.registry.get_active_ranks()
         self.logger.log_event(
             f"Stage {dead_stage} reassigned after "
             f"rank {dead_rank} failure"
         )
 
-        # Update monitor's active ranks list
+        # Update monitor's active ranks list (monitor should validate new heartbeats)
         if self.monitor:
             self.monitor.update_active_ranks(
                 self.registry.get_active_ranks()
             )
+
+        # If scheduler could not find a replacement, resume and exit
+        if replacement is None:
+            print("[Master] No replacement available — cannot continue. Resuming to allow shutdown.")
+            self.resume_event.set()
+            return
+
+        # Wait for replacement worker to signal READY
+        print(f"[Master] Waiting for replacement rank {replacement} READY signal...")
+        start = time.time()
+        ready = False
+        TIMEOUT = 120
+        while time.time() - start < TIMEOUT:
+            try:
+                sig = recv_signal(src=replacement)
+                if sig == SIGNAL_READY.item():
+                    ready = True
+                    print(f"[Master] Replacement rank {replacement} is READY")
+                    break
+                else:
+                    print(f"[Master] Received unexpected signal {sig} from {replacement}; waiting for READY")
+            except Exception:
+                time.sleep(0.5)
+
+        if not ready:
+            print(f"[Master] Timeout waiting for replacement {replacement} READY")
+
+        # Resume master send loop
+        self.resume_event.set()
 
     def run_batch(self, images, labels, epoch, batch_idx):
         """
@@ -147,26 +213,90 @@ class Master:
             loss (float), accuracy (float)
         """
 
+        # If a promotion/reconfiguration is in progress, wait until it's ready
+        self.resume_event.wait()
+
         # Who is first and last in pipeline?
         first_worker = self.scheduler.get_first_worker()
         last_worker  = self.scheduler.get_last_worker()
 
+        print(f"[Master] Batch {batch_idx}: first_worker={first_worker}, last_worker={last_worker}")
+
         # Step 1: Send START to every active stage worker.
         # Each worker's loop expects one control signal per batch.
         for rank in self.registry.get_active_ranks():
+            print(f"[Master] Sending START signal to rank {rank}")
             send_signal(SIGNAL_START, dst=rank)
 
+        # Larger delay to ensure workers have processed START signal
+        time.sleep(0.1)
+
         # Step 2: Send image batch to first worker
+        print(f"[Master] Sending {images.shape} tensor to first_worker {first_worker}")
         send_tensor(images, dst=first_worker)
+        
+        # Small delay between tensor sends
+        time.sleep(0.05)
 
         # Also send labels to last worker
         # (it needs them to compute loss)
+        print(f"[Master] Sending {labels.shape} labels tensor to last_worker {last_worker}")
         send_tensor(labels.float(), dst=last_worker)
 
-        # Step 3: Wait for results from last worker
-        loss, accuracy = recv_metrics(src=last_worker)
+        # Delay before expecting metrics
+        time.sleep(0.05)
 
-        return loss, accuracy
+        # Step 3: Wait for results from last worker
+        try:
+            print(f"[Master] Waiting for metrics from rank {last_worker}")
+            loss, accuracy = recv_metrics(src=last_worker)
+            print(f"[Master] ✓ Received metrics: loss={loss:.4f}, accuracy={accuracy:.2f}%")
+            return loss, accuracy
+        except Exception as e:
+            print(f"[Master] Error receiving metrics from rank {last_worker}: {e}")
+            # Trigger failure handling for the last worker and wait for replacement
+            try:
+                self.handle_failure(last_worker)
+            except Exception as he:
+                print(f"[Master] handle_failure raised: {he}")
+
+            # Wait until resume_event (replacement READY) before retrying
+            print("[Master] Waiting for promotion/resume before retrying batch...")
+            self.resume_event.wait()
+
+            # After promotion, resend START and tensors for this batch
+            print("[Master] Resending START and tensors for interrupted batch...")
+            # Recompute first/last workers (may have changed)
+            first_worker = self.scheduler.get_first_worker()
+            last_worker = self.scheduler.get_last_worker()
+
+            # Send START to every active worker again
+            for rank in self.registry.get_active_ranks():
+                send_signal(SIGNAL_START, dst=rank)
+
+            time.sleep(0.1)
+
+            # Re-send the image batch and labels
+            try:
+                send_tensor(images, dst=first_worker)
+                time.sleep(0.05)
+                send_tensor(labels.float(), dst=last_worker)
+            except Exception as send_e:
+                print(f"[Master] Error resending tensors: {send_e}")
+                raise
+
+            # Delay to let P2P connections settle
+            time.sleep(0.15)
+
+            # Retry once to receive metrics
+            try:
+                print(f"[Master] Retrying: waiting for metrics from rank {last_worker}")
+                loss, accuracy = recv_metrics(src=last_worker)
+                print(f"[Master] ✓ Retry succeeded: loss={loss:.4f}, accuracy={accuracy:.2f}%")
+                return loss, accuracy
+            except Exception as e2:
+                print(f"[Master] Retry failed receiving metrics: {e2}")
+                raise
 
 
     def run_epoch(self, epoch):
@@ -183,33 +313,58 @@ class Master:
         total_batches = len(self.train_loader)
         total_loss    = 0.0
         total_acc     = 0.0
+        successful_batches = 0
 
-        for batch_idx, (images, labels) in \
-                enumerate(self.train_loader, 1):
+        for batch_idx, (images, labels) in enumerate(self.train_loader, 1):
 
-            loss, accuracy = self.run_batch(
-                images, labels, epoch, batch_idx
-            )
+            print(f"[Master] Processing batch {batch_idx}/{total_batches}")
 
-            total_loss += loss
-            total_acc  += accuracy
+            try:
+                loss, accuracy = self.run_batch(images, labels, epoch, batch_idx)
 
-            # Log every batch
-            self.logger.log_batch(
-                epoch         = epoch,
-                batch         = batch_idx,
-                total_batches = total_batches,
-                loss          = loss,
-                accuracy      = accuracy
-            )
+            except Exception as e:
+                # Log error but continue with next batch to keep training visible
+                print(f"[Master] Batch {batch_idx} failed: {e}")
+                self.logger.log_event(f"Batch {batch_idx} failed: {e}")
+                # Still send SIGNAL_NEXT to keep workers in sync (even though this batch failed)
+                loss = None
+                accuracy = None
 
-            # Send NEXT to all active workers so batch counters
-            # and checkpoint cadence stay aligned across stages.
+            # If batch succeeded, aggregate metrics
+            if loss is not None and accuracy is not None:
+                total_loss += loss
+                total_acc  += accuracy
+                successful_batches += 1
+
+                # Log every successful batch
+                self.logger.log_batch(
+                    epoch         = epoch,
+                    batch         = batch_idx,
+                    total_batches = total_batches,
+                    loss          = loss,
+                    accuracy      = accuracy
+                )
+                
+                print(f"[Master] ✓ Batch {batch_idx} complete: loss={loss:.4f}, accuracy={accuracy:.2f}%")
+            else:
+                print(f"[Master] Batch {batch_idx} skipped (failed)")
+
+            # ALWAYS send SIGNAL_NEXT to keep workers in sync with batch counter
+            # even if this batch failed, we still move to next
+            print(f"[Master] Sending SIGNAL_NEXT to all active workers")
             for rank in self.registry.get_active_ranks():
-                send_signal(SIGNAL_NEXT, dst=rank)
+                try:
+                    send_signal(SIGNAL_NEXT, dst=rank)
+                except Exception as sync_err:
+                    print(f"[Master] Warning: could not send SIGNAL_NEXT to rank {rank}: {sync_err}")
 
-        avg_loss = total_loss / total_batches
-        avg_acc  = total_acc  / total_batches
+        # Compute averages using only successful batches to avoid skew
+        if successful_batches > 0:
+            avg_loss = total_loss / successful_batches
+            avg_acc  = total_acc  / successful_batches
+        else:
+            avg_loss = 0.0
+            avg_acc = 0.0
 
         return avg_loss, avg_acc
 
@@ -238,7 +393,10 @@ class Master:
         self.setup_network(world_size)
 
         # ── Step 3: Wait for workers ───────────────────────
-        total_workers = self.wait_for_workers()
+        total_workers = self.wait_for_workers(expected_workers)
+
+        # Start timing only after every expected worker is connected.
+        self.logger.start_timing()
 
         # ── Step 4: Assign stages ──────────────────────────
         stages = self.scheduler.assign_stages()

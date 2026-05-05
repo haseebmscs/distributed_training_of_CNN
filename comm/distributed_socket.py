@@ -336,7 +336,7 @@ class DistributedSocketGroup:
 
     @staticmethod
     def _send_json(conn, obj, timeout=30):
-        """Send JSON object over socket with length prefix."""
+        """Send JSON object over socket with explicit flush."""
         try:
             conn.settimeout(timeout)
             data = json.dumps(obj).encode("utf-8")
@@ -347,26 +347,29 @@ class DistributedSocketGroup:
 
     @staticmethod
     def _recv_json(conn, timeout=30):
-        """Receive JSON object from socket with length prefix."""
+        """Receive JSON object from socket with strict frame alignment."""
         try:
             conn.settimeout(timeout)
             
-            # Read length (4 bytes)
+            # Read length (4 bytes) with strict blocking
             length_bytes = b""
             while len(length_bytes) < 4:
                 chunk = conn.recv(4 - len(length_bytes))
                 if not chunk:
-                    raise ConnectionError("Connection closed")
+                    raise ConnectionError("Connection closed while reading length")
                 length_bytes += chunk
             
             length = int.from_bytes(length_bytes, "big")
+            if length <= 0 or length > 10_000_000:
+                raise RuntimeError(f"Invalid JSON length: {length} bytes")
             
-            # Read data
+            # Read data with strict blocking
             data = b""
             while len(data) < length:
-                chunk = conn.recv(length - len(data))
+                need = length - len(data)
+                chunk = conn.recv(min(need, 65536))  # Read in 64KB chunks max
                 if not chunk:
-                    raise ConnectionError("Connection closed")
+                    raise ConnectionError(f"Connection closed after {len(data)}/{length} bytes")
                 data += chunk
             
             return json.loads(data.decode("utf-8"))

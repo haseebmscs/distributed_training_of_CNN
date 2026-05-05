@@ -40,6 +40,10 @@ class MasterBootstrapServer:
         self.running = False
         self.thread = None
         self._ready = threading.Event()
+        # Event that signals we've assigned the expected number
+        # of active workers (master can proceed to start training)
+        self._assigned_expected = threading.Event()
+        # Event that signals the server has fully stopped
         self._complete = threading.Event()
         self._lock = threading.Lock()
         self._next_rank = 1
@@ -65,8 +69,14 @@ class MasterBootstrapServer:
                 self._ready.set()
                 print(f"[Bootstrap] Listening on {self.host}:{self.port}")
 
-                while self.running and self._next_rank <= self.expected_workers:
-                    if self.timeout is not None and started_at is not None:
+                # Keep accepting registrations indefinitely while running.
+                # We only enforce the initial timeout until the expected
+                # number of workers have been assigned. After that we
+                # continue accepting late joiners (they become standby).
+                while self.running:
+                    # Enforce timeout only until expected assigned
+                    if (not self._assigned_expected.is_set() and
+                            self.timeout is not None and started_at is not None):
                         elapsed = __import__("time").time() - started_at
                         if elapsed > self.timeout:
                             raise TimeoutError(
@@ -78,6 +88,7 @@ class MasterBootstrapServer:
                         conn, addr = server.accept()
                     except socket.timeout:
                         continue
+
                     with conn:
                         try:
                             peer_info = _recv_json(conn)
@@ -101,6 +112,13 @@ class MasterBootstrapServer:
                                 f"[Bootstrap] Assigned rank {rank} to "
                                 f"{peer_info.get('hostname', addr[0])}"
                             )
+
+                            # If we've just handed out the expected count,
+                            # signal the master that training can begin.
+                            if (not self._assigned_expected.is_set() and
+                                    (rank >= self.expected_workers)):
+                                self._assigned_expected.set()
+
                         except Exception:
                             print("[Bootstrap] Worker bootstrap failed:")
                             print(traceback.format_exc())
@@ -113,8 +131,19 @@ class MasterBootstrapServer:
             print("[Bootstrap] Server failed:")
             print(self._server_error)
 
+    def wait_for_expected(self, timeout=None):
+        """
+        Block until at least `expected_workers` have been assigned a rank.
+        Returns True if the expected count arrived within `timeout`.
+        """
+        return self._assigned_expected.wait(timeout=timeout)
+
     def wait_until_complete(self, timeout=None):
         return self._complete.wait(timeout=timeout)
+
+    def get_error(self):
+        """Return bootstrap server error text if startup/assignment failed."""
+        return self._server_error
 
     def stop(self):
         self.running = False

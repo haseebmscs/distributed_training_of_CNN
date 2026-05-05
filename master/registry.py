@@ -66,6 +66,7 @@ class WorkerRegistry:
             total = len(self.workers)
             print(f"[Registry] Rank {rank} registered "
                   f"— total workers: {total}/{MAX_WORKERS}")
+            print(f"[Registry] Rank {rank} initial status: STANDBY")
             return True
 
     # ── STATUS UPDATES ────────────────────────────────────
@@ -171,7 +172,9 @@ class WorkerRegistry:
         """
         standbys = self.get_standby_ranks()
         if standbys:
+            print(f"[Registry] Standby candidates: {standbys}")
             return standbys[0]
+        print("[Registry] No standby candidates available")
         return None
 
     def is_ready_to_train(self):

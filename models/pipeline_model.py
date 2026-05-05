@@ -43,7 +43,7 @@ def make_block4():
     )
 
 def make_classifier():
-    # Input:  (B, 256, 4, 4) → flattened to (B, 4096)
+    # Input:  (B, 256, 4, 4) -> flattened to (B, 4096)
     # Output: (B, 10)
     return nn.Sequential(
         nn.Flatten(),
@@ -129,7 +129,7 @@ def split_model(num_workers):
     for i, indices in enumerate(plan):
         names = ["Block1","Block2","Block3","Block4","Classifier"]
         unit_names = [names[j] for j in indices]
-        print(f"  Stage {i+1} → {' + '.join(unit_names)}")
+        print(f"  Stage {i+1} -> {' + '.join(unit_names)}")
 
     return stages
 
