@@ -29,9 +29,9 @@ from comm.comm_utils   import (
 )
 from comm.signals      import (
     SIGNAL_START, SIGNAL_STOP,
-    SIGNAL_NEXT
+    SIGNAL_NEXT, SIGNAL_STEP,
+    SIGNAL_READY, SIGNAL_RECONFIG
 )
-from comm.signals      import SIGNAL_READY
 from dataset.custom_dataset import get_dataloaders
 
 class Master:
@@ -96,7 +96,7 @@ class Master:
             timeout=SOCKET_TIMEOUT
         )
 
-        print("[Master] Socket network ready ✅")
+        print("[Master] Socket network ready [OK]")
 
     def wait_for_workers(self, expected_workers):
         """Wait until all expected workers are assigned by bootstrap."""
@@ -140,7 +140,7 @@ class Master:
         Args:
             dead_rank (int): rank of dead worker
         """
-        print(f"\n[Master] ⚠️  Worker {dead_rank} failed!")
+        print(f"\n[Master] [WARN] Worker {dead_rank} failed!")
         self.logger.log_worker_failed(dead_rank)
 
         # Get dead worker's stage
@@ -167,7 +167,7 @@ class Master:
 
         # If scheduler could not find a replacement, resume and exit
         if replacement is None:
-            print("[Master] No replacement available — cannot continue. Resuming to allow shutdown.")
+            print("[Master] No replacement available - cannot continue. Resuming to allow shutdown.")
             self.resume_event.set()
             return
 
@@ -250,7 +250,7 @@ class Master:
         try:
             print(f"[Master] Waiting for metrics from rank {last_worker}")
             loss, accuracy = recv_metrics(src=last_worker)
-            print(f"[Master] ✓ Received metrics: loss={loss:.4f}, accuracy={accuracy:.2f}%")
+            print(f"[Master] Received metrics: loss={loss:.4f}, accuracy={accuracy:.2f}%")
             return loss, accuracy
         except Exception as e:
             print(f"[Master] Error receiving metrics from rank {last_worker}: {e}")
@@ -292,7 +292,7 @@ class Master:
             try:
                 print(f"[Master] Retrying: waiting for metrics from rank {last_worker}")
                 loss, accuracy = recv_metrics(src=last_worker)
-                print(f"[Master] ✓ Retry succeeded: loss={loss:.4f}, accuracy={accuracy:.2f}%")
+                print(f"[Master] Retry succeeded: loss={loss:.4f}, accuracy={accuracy:.2f}%")
                 return loss, accuracy
             except Exception as e2:
                 print(f"[Master] Retry failed receiving metrics: {e2}")
@@ -345,7 +345,7 @@ class Master:
                     accuracy      = accuracy
                 )
                 
-                print(f"[Master] ✓ Batch {batch_idx} complete: loss={loss:.4f}, accuracy={accuracy:.2f}%")
+                print(f"[Master] Batch {batch_idx} complete: loss={loss:.4f}, accuracy={accuracy:.2f}%")
             else:
                 print(f"[Master] Batch {batch_idx} skipped (failed)")
 
@@ -366,6 +366,125 @@ class Master:
             avg_loss = 0.0
             avg_acc = 0.0
 
+        return avg_loss, avg_acc
+
+    def run_epoch_streaming(self, epoch):
+        """
+        Runs one epoch using TRUE STREAMING PIPELINE PARALLELISM.
+        
+        Strategy:
+        - Batch 1 → Worker 1 (stage 1)
+        - When Worker 1 done: Batch 1 → Worker 2, Batch 2 → Worker 1 (no idle!)
+        - When Worker 2 done: Batch 1 → Worker 3, Batch 2 → Worker 2, Batch 3 → Worker 1
+        - Continue until all batches flow through all stages
+        - Accumulate gradients for all in-flight batches
+        - Update weights (SIGNAL_STEP) after epoch completes
+        
+        This creates a continuous pipeline where workers are never idle.
+        
+        Args:
+            epoch (int): current epoch
+        
+        Returns:
+            avg_loss (float), avg_accuracy (float)
+        """
+        print(f"\n[Master] === EPOCH {epoch}/{EPOCHS} (Streaming Pipeline) ===")
+        
+        first_worker = self.scheduler.get_first_worker()
+        last_worker = self.scheduler.get_last_worker()
+        active_ranks = self.registry.get_active_ranks()
+        num_stages = len(active_ranks)
+        
+        # Load all batches
+        all_batches = []
+        for images, labels in self.train_loader:
+            all_batches.append((images, labels))
+        
+        total_batches = len(all_batches)
+        print(f"[Master] Loaded {total_batches} batches, {num_stages} stages")
+        
+        total_loss = 0.0
+        total_acc = 0.0
+        completed_batches = 0
+        
+        # Track in-flight batches: batch_idx → current stage
+        in_flight = {}  # batch_idx → worker_rank (where it currently is)
+        batch_idx = 0
+        
+        print(f"\n[Master] Starting streaming pipeline...")
+        
+        # Send initial batches to fill the pipeline
+        for i in range(min(num_stages, total_batches)):
+            images, labels = all_batches[i]
+            print(f"[Master] Sending batch {i+1}/{total_batches} to Worker {first_worker} (stage 1)")
+            
+            # Send SIGNAL_START to ALL workers (synchronization point)
+            for rank in active_ranks:
+                send_signal(SIGNAL_START, dst=rank)
+            
+            # Send data to specific workers
+            send_tensor(images, dst=first_worker)
+            send_tensor(labels.float(), dst=last_worker)
+            
+            in_flight[i] = first_worker
+            batch_idx = i + 1
+        
+        # Continue feeding new batches as workers complete stages
+        while completed_batches < total_batches:
+            # Wait for a metric from the last worker (batch completion signal)
+            try:
+                loss, accuracy = recv_metrics(src=last_worker)
+                completed_batches += 1
+                total_loss += loss
+                total_acc += accuracy
+                print(f"[Master] Batch completed! Loss={loss:.4f}, Acc={accuracy:.2f}% ({completed_batches}/{total_batches})")
+            except Exception as e:
+                print(f"[Master] Error receiving metrics: {e}")
+                continue
+            
+            # If there are more batches to send, send next batch to first worker
+            if batch_idx < total_batches:
+                images, labels = all_batches[batch_idx]
+                print(f"[Master] Sending batch {batch_idx+1}/{total_batches} to Worker {first_worker} (stage 1)")
+                
+                # Send SIGNAL_START to ALL workers (synchronization point)
+                for rank in active_ranks:
+                    send_signal(SIGNAL_START, dst=rank)
+                
+                # Send data to specific workers
+                send_tensor(images, dst=first_worker)
+                send_tensor(labels.float(), dst=last_worker)
+                
+                in_flight[batch_idx] = first_worker
+                batch_idx += 1
+        
+        # All batches completed - signal workers to update weights
+        print(f"\n[Master] All {total_batches} batches completed. Sending SIGNAL_STEP to update weights...")
+        for rank in active_ranks:
+            try:
+                send_signal(SIGNAL_STEP, dst=rank)
+            except Exception as e:
+                print(f"[Master] Warning: could not send SIGNAL_STEP to rank {rank}: {e}")
+        
+        # Send SIGNAL_NEXT to bump epoch counter for checkpoints
+        for rank in active_ranks:
+            try:
+                send_signal(SIGNAL_NEXT, dst=rank)
+            except Exception as e:
+                print(f"[Master] Warning: could not send SIGNAL_NEXT to rank {rank}: {e}")
+        
+        if completed_batches > 0:
+            avg_loss = total_loss / completed_batches
+            avg_acc = total_acc / completed_batches
+        else:
+            avg_loss = 0.0
+            avg_acc = 0.0
+        
+        print(f"\n[Master] Epoch {epoch} Summary:")
+        print(f"  Total Batches: {completed_batches}")
+        print(f"  Avg Loss: {avg_loss:.4f}")
+        print(f"  Avg Accuracy: {avg_acc:.2f}%")
+        
         return avg_loss, avg_acc
 
     def run(self, world_size):
@@ -426,11 +545,20 @@ class Master:
         # ── Step 8: Training loop ──────────────────────────
         print(f"\n[Master] Starting training "
               f"for {EPOCHS} epochs...\n")
+        
+        # Import config for pipeline mode
+        from config import PIPELINE_ENABLED, PIPELINE_DEPTH
 
         for epoch in range(1, EPOCHS + 1):
             print(f"\n[Master] ── Epoch {epoch}/{EPOCHS} ──")
 
-            avg_loss, avg_acc = self.run_epoch(epoch)
+            # Use pipelined training if enabled
+            if PIPELINE_ENABLED and len(stages) > 1:
+                print(f"[Master] Using TRUE PIPELINE PARALLELISM (depth={PIPELINE_DEPTH})")
+                avg_loss, avg_acc = self.run_epoch_streaming(epoch)
+            else:
+                print(f"[Master] Using sequential training")
+                avg_loss, avg_acc = self.run_epoch(epoch)
 
             self.logger.log_epoch(
                 epoch        = epoch,

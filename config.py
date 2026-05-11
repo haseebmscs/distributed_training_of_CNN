@@ -45,7 +45,8 @@ EPOCHS            = _env_int("EPOCHS", 5)
 BATCH_SIZE        = _env_int("BATCH_SIZE", 128)
 LEARNING_RATE     = _env_float("LEARNING_RATE", 0.01)
 DATA_LOADER_WORKERS = _env_int("DATA_LOADER_WORKERS", 0)
-
+PIPELINE_ENABLED  = _env_bool("PIPELINE_ENABLED", True)
+PIPELINE_DEPTH    = _env_int("PIPELINE_DEPTH", 3)
 # ── Heartbeat Settings ────────────────────────
 HEARTBEAT_INTERVAL = _env_int("HEARTBEAT_INTERVAL", 5)
 HEARTBEAT_TIMEOUT  = _env_int("HEARTBEAT_TIMEOUT", 15)

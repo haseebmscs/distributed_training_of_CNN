@@ -1,21 +1,8 @@
 torch
 torchvision
 Pillow
-matplotlib
 numpy
+matplotlib
 
-
-# only to Download data set install this and run commmand in terminal
-
-# pip install gdown
-
-# Create the data folder first
-# mkdir -p dataset/data
-
-# Download train data
-# gdown 1IOqORGYFcc0ggrHuW4T3yVLXBsidxqhO -O dataset/data/train.zip
-
-# Download test data
-# gdown 1TwzuZ41nex3DnHR3rjqCA-m95aAfrdzG -O dataset/data/test.zip
-
-# Expand-Archive dataset\data\train.zip -DestinationPath dataset\data\
+# Optional helper for manual dataset download if you want to use the old zip workflow
+# gdown

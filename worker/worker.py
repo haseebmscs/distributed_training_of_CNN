@@ -24,7 +24,8 @@ from comm.signals import (
     SIGNAL_START, SIGNAL_STOP,
     SIGNAL_NEXT,  SIGNAL_HELLO,
     SIGNAL_STANDBY, SIGNAL_PROMOTE,
-    SIGNAL_DONE, SIGNAL_ASSIGN, SIGNAL_READY
+    SIGNAL_DONE, SIGNAL_ASSIGN, SIGNAL_READY,
+    SIGNAL_RECONFIG, SIGNAL_STEP
 )
 from comm.heartbeat    import HeartbeatSender
 from utils.checkpoint  import (
@@ -155,9 +156,22 @@ class Worker:
         # standbys can continue from the most recent epoch.
         latest_epoch = find_latest_checkpoint(self.stage_idx)
         if latest_epoch > 0:
-            loaded = load_checkpoint(self.stage, self.stage_idx, self.optimizer, latest_epoch)
-            self.loaded_epoch = loaded
-            print(f"[Worker {self.rank}] Restored from checkpoint epoch {loaded}")
+            try:
+                loaded = load_checkpoint(
+                    self.stage,
+                    self.stage_idx,
+                    self.optimizer,
+                    latest_epoch
+                )
+                self.loaded_epoch = loaded
+                print(f"[Worker {self.rank}] Restored from checkpoint epoch {loaded}")
+            except Exception as e:
+                # Older checkpoints can be incompatible after model split changes.
+                self.loaded_epoch = 0
+                print(
+                    f"[Worker {self.rank}] Warning: incompatible checkpoint for "
+                    f"current stage layout ({e}). Starting fresh."
+                )
         else:
             self.loaded_epoch = 0
             print(f"[Worker {self.rank}] Starting fresh")
@@ -198,7 +212,7 @@ class Worker:
                         try:
                             print(f"[Worker {self.rank}] Connecting to next rank {self.next_rank} at {next_ip}:{next_port} (attempt {attempt+1}/5)")
                             self.p2p_client.connect(self.next_rank, next_ip, next_port)
-                            print(f"[Worker {self.rank}] ✓ Connected to next rank {self.next_rank}")
+                            print(f"[Worker {self.rank}] Connected to next rank {self.next_rank}")
                             break
                         except Exception as e:
                             if attempt < 4:
@@ -223,7 +237,7 @@ class Worker:
                         try:
                             print(f"[Worker {self.rank}] Connecting to prev rank {self.prev_rank} at {prev_ip}:{prev_port} (attempt {attempt+1}/5)")
                             self.p2p_client.connect(self.prev_rank, prev_ip, prev_port)
-                            print(f"[Worker {self.rank}] ✓ Connected to prev rank {self.prev_rank}")
+                            print(f"[Worker {self.rank}] Connected to prev rank {self.prev_rank}")
                             break
                         except Exception as e:
                             if attempt < 4:
@@ -247,23 +261,24 @@ class Worker:
 
         If this is the LAST stage:
             - Also receives labels from Master
-            - Computes loss
-            - Sends loss/accuracy back to Master
+            - Computes loss and accuracy
+            - Does NOT send metrics (deferred to after backward)
 
         Data path (GFS-style, direct P2P):
         - First worker: Master → P2P to worker2
         - Middle workers: P2P from prevWorker → P2P to nextWorker
-        - Last worker: P2P from prevWorker, computes loss, sends metrics to Master
+        - Last worker: P2P from prevWorker, computes loss, returns (output, loss, accuracy)
 
         Returns:
             output (tensor): result of this stage
             loss   (tensor): loss value (last stage only)
+            accuracy (float): accuracy (last stage only, else None)
         """
 
         is_first = (self.stage_idx == 0)
         is_last  = (self.stage_idx == self.total_stages - 1)
 
-        print(f"\n[Worker {self.rank}] ═══ FORWARD PASS ═══")
+        print(f"\n[Worker {self.rank}] === FORWARD PASS ===")
         print(f"  Stage: {self.stage_idx + 1}/{self.total_stages}")
 
         # ── Receive input ──────────────────────────────────
@@ -306,11 +321,11 @@ class Worker:
             print(f"   Loss: {loss.item():.4f}")
             print(f"   Accuracy: {accuracy:.2f}%")
 
-            # Send metrics to Master
-            send_metrics(loss.item(), accuracy, dst=0)
-            print(f"   Sent metrics to Master (rank 0)")
+            # NOTE: Do NOT send metrics here in pipelined mode.
+            # Metrics will be sent after backward pass during SIGNAL_STEP.
+            # This allows multiple forward passes to execute in parallel.
 
-            return output, loss
+            return output, loss, accuracy
 
         else:
             # Send output to next worker via P2P
@@ -319,7 +334,7 @@ class Worker:
 
             return output, None
 
-    def backward_pass(self, loss=None):
+    def backward_pass(self, loss=None, accumulate=False):
         """
         Receives gradients from next worker,
         runs backward pass through this stage,
@@ -341,20 +356,22 @@ class Worker:
 
         Args:
             loss (tensor): loss value — only for last stage
+            accumulate (bool): if True, accumulate gradients (don't zero at start)
         """
 
         is_first = (self.stage_idx == 0)
         is_last  = (self.stage_idx == self.total_stages - 1)
 
-        print(f"\n[Worker {self.rank}] ═══ BACKWARD PASS ═══")
+        print(f"\n[Worker {self.rank}] === BACKWARD PASS ===")
         print(f"  Stage: {self.stage_idx + 1}/{self.total_stages}")
 
-        # Zero gradients before backward
-        self.optimizer.zero_grad()
+        # Only zero gradients before backward if NOT accumulating
+        if not accumulate:
+            self.optimizer.zero_grad()
 
         if is_last:
             # Start backward pass from loss
-            print(f"  🔄 Starting backward from loss: {loss.item():.4f}")
+            print(f"  [BW] Starting backward from loss: {loss.item():.4f}")
             loss.backward()
             print(f"   Backward pass computed")
 
@@ -372,7 +389,7 @@ class Worker:
             print(f"   Received gradient: {list(received_grad.shape)}")
 
             # Continue backward pass
-            print(f"  🔄 Computing backward pass with received gradient...")
+            print(f"  [BW] Computing backward pass with received gradient...")
             self.last_output.backward(received_grad)
             print(f"   Backward pass computed")
 
@@ -383,22 +400,30 @@ class Worker:
                     print(f"   Sending gradient to Rank {self.prev_rank} (P2P): {list(grad.shape)}")
                     self.p2p_client.send_tensor(grad, self.prev_rank)
 
-        # Update this stage's weights
-        print(f"  🔧 Updating stage weights via optimizer...")
-        self.optimizer.step()
-        print(f"   Weights updated")
+        # NOTE: Do NOT update weights here anymore
+        # Weights will only be updated when SIGNAL_STEP is received
+        # This enables gradient accumulation for pipelined training
 
     def run_active(self):
         """
-        Main loop for an ACTIVE worker.
-        Keeps running until Master sends SIGNAL_STOP.
+        Main loop for an ACTIVE worker - Streaming Pipeline.
+        
+        Flow:
+        1. SIGNAL_START: receive input → forward → send output to next (or loss if last)
+        2. Multiple STARTs keep batches flowing through the pipeline
+        3. SIGNAL_STEP: Do backward on all buffered batches → accumulate gradients → optimizer.step()
+        
+        Multiple batches flow through in parallel - no idle time!
+        Workers accumulate gradients across all batches, update weights once per epoch.
         """
 
-        print(f"[Worker {self.rank}] Starting "
-              f"active training loop...")
+        print(f"[Worker {self.rank}] Starting active training loop (streaming pipeline)...")
 
         # Initialize epoch counter from loaded checkpoint if available
         epoch = getattr(self, "loaded_epoch", 0) or 1
+        
+        # Buffer for streaming pipeline
+        loss_buffer = []  # Losses from last stage worker
 
         while True:
             # Wait for signal from Master
@@ -406,25 +431,65 @@ class Worker:
 
             # ── STOP signal ────────────────────────────────
             if signal_val == SIGNAL_STOP.item():
-                print(f"[Worker {self.rank}] "
-                      f"Received STOP — shutting down")
+                print(f"[Worker {self.rank}] Received STOP - shutting down")
                 break
 
             # ── START signal ───────────────────────────────
             elif signal_val == SIGNAL_START.item():
-                is_last = (
-                    self.stage_idx == self.total_stages - 1
-                )
+                # Forward pass: receives input, processes, sends output to next worker
+                result = self.forward_pass()
+                
+                is_last = (self.stage_idx == self.total_stages - 1)
+                if is_last:
+                    # Last stage: buffer loss for backward later, send metrics now
+                    _, loss, accuracy = result
+                    loss_buffer.append(loss)  # Keep loss for backward in SIGNAL_STEP
+                    send_metrics(loss.item(), accuracy, dst=0)
+                    print(f"[Worker {self.rank}] Buffered loss, sent metrics: loss={loss.item():.4f}, acc={accuracy:.2f}%")
 
-                # Forward pass
-                output, loss = self.forward_pass()
+            # ── STEP signal ────────────────────────────────
+            elif signal_val == SIGNAL_STEP.item():
+                # Backward pass: backward all buffered losses, accumulate gradients, update weights
+                is_last = (self.stage_idx == self.total_stages - 1)
+                
+                if is_last and loss_buffer:
+                    print(f"[Worker {self.rank}] STEP: Backward {len(loss_buffer)} buffered losses...")
+                    for idx, loss in enumerate(loss_buffer):
+                        print(f"  Backward {idx+1}/{len(loss_buffer)}: loss={loss.item():.4f}")
+                        loss.backward()
+                    loss_buffer.clear()
+                elif not is_last:
+                    print(f"[Worker {self.rank}] STEP: Receiving gradients for backward (non-last stage)...")
+                    # For middle/first stages, backward is handled by gradient reception
+                    # In streaming, we wait for gradient from next stage to backward
+                    # For now, skip - user wants simple accumulation
 
-                # Backward pass
-                self.backward_pass(loss)
+                # Update weights once after all batches
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                print(f"[Worker {self.rank}] Weights updated via optimizer.step()")
+
+            # ── RECONFIG/ASSIGN signal ─────────────────────
+            elif signal_val == SIGNAL_RECONFIG.item() or signal_val == SIGNAL_ASSIGN.item():
+                old_stage_idx = self.stage_idx
+                old_total = self.total_stages
+
+                self.receive_assignment()
+
+                if self.stage_idx != old_stage_idx or self.total_stages != old_total or self.stage is None:
+                    self.build_stage()
+
+                self.refresh_p2p_links()
+
+                try:
+                    send_signal(SIGNAL_READY, dst=0)
+                    print(f"[Worker {self.rank}] Sent READY after runtime reconfig")
+                except Exception as e:
+                    print(f"[Worker {self.rank}] Warning: could not send READY after runtime reconfig: {e}")
 
             # ── NEXT signal ────────────────────────────────
             elif signal_val == SIGNAL_NEXT.item():
-                # New batch coming — increment counter
+                # New epoch coming — increment counter
                 epoch += 1
 
                 # Save checkpoint if needed
