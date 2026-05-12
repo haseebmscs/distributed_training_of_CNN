@@ -168,13 +168,13 @@ class P2PDataServer:
             self.thread.join(timeout=2)
         print(f"[P2P-Server] Rank {self.rank} stopped")
 
-    def recv_tensor(self, src, timeout=30):
+    def recv_tensor(self, src, timeout=60):
         """
         Receive a tensor from source rank.
         
         Args:
             src (int): source rank
-            timeout (float): max seconds to wait
+            timeout (float): max seconds to wait (default: 60 seconds, increased from 30)
         
         Returns:
             tensor: the received tensor
